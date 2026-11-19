@@ -28,6 +28,7 @@
 // KDE
 #include <KWayland/Client/plasmashell.h>
 #include <KWayland/Client/surface.h>
+#include <KWindowSystem>
 
 #define RELOCATIONSHOWINGEVENT QStringLiteral("viewInRelocationShowing")
 
@@ -76,6 +77,10 @@ Positioner::Positioner(Latte::View *parent)
     m_syncGeometryTimer.setSingleShot(true);
     m_syncGeometryTimer.setInterval(150);
     connect(&m_syncGeometryTimer, &QTimer::timeout, this, &Positioner::immediateSyncGeometry);
+
+    m_outputLayoutSettleTimer.setSingleShot(true);
+    m_outputLayoutSettleTimer.setInterval(750);
+    connect(&m_outputLayoutSettleTimer, &QTimer::timeout, this, &Positioner::reassertCompositorPosition);
 
     m_corona = qobject_cast<Latte::Corona *>(m_view->corona());
 
@@ -196,6 +201,19 @@ void Positioner::init()
     connect(m_view->effects(), &Latte::ViewPart::Effects::drawShadowsChanged, this, &Positioner::syncGeometry);
 
     connect(qGuiApp, &QGuiApplication::screenAdded, this, &Positioner::onScreenChanged);
+
+    //! Any change of the global output layout (not only of this dock's own screen) can make
+    //! the compositor relocate the dock surface, e.g. when another output is temporarily
+    //! removed and the remaining outputs are moved to the origin. Watch all of them.
+    for (const auto screens = qGuiApp->screens(); auto *scr : screens) {
+        connect(scr, &QScreen::geometryChanged, this, &Positioner::onOutputLayoutChanged);
+    }
+
+    connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *scr) {
+        connect(scr, &QScreen::geometryChanged, this, &Positioner::onOutputLayoutChanged);
+        onOutputLayoutChanged();
+    });
+    connect(qGuiApp, &QGuiApplication::screenRemoved, this, &Positioner::onOutputLayoutChanged);
     connect(m_corona->screenPool(), &ScreenPool::primaryScreenChanged, this, &Positioner::onScreenChanged);
 
     connect(m_view, &Latte::View::visibilityChanged, this, &Positioner::initDelayedSignals);
@@ -480,6 +498,39 @@ void Positioner::onScreenChanged(QScreen *scr)
     //! of the screen must be updated to the new ones
     if (m_view->visibility() && m_view->visibility()->mode() == Latte::Types::AlwaysVisible) {
         m_view->updateAbsoluteGeometry(true);
+    }
+}
+
+void Positioner::onOutputLayoutChanged()
+{
+    if (m_inDelete || !KWindowSystem::isPlatformWayland()) {
+        return;
+    }
+
+    //! restart: wait until the output layout has stopped changing
+    m_outputLayoutSettlePasses = 2;
+    m_outputLayoutSettleTimer.start(750);
+}
+
+void Positioner::reassertCompositorPosition()
+{
+    if (m_inDelete) {
+        return;
+    }
+
+    //! On Wayland the window position is only a request sent through the plasma-shell
+    //! surface. While outputs change, KWin may move panel surfaces into the outputs that
+    //! exist at that moment (for example a bottom dock of a tall portrait monitor ends up
+    //! at the height of the remaining landscape monitor) and does not move them back when
+    //! the original layout returns. Qt never learns about that move, so the cached window
+    //! geometry still looks valid. Recompute and re-send the position explicitly.
+    qCDebug(latteView) << "reasserting dock position after output layout change, passes left:" << m_outputLayoutSettlePasses;
+    m_forceCompositorPosition = true;
+    syncGeometry();
+
+    if (--m_outputLayoutSettlePasses > 0) {
+        //! a second, later pass catches compositors that finish rearranging outputs lazily
+        m_outputLayoutSettleTimer.start(2000);
     }
 }
 
@@ -875,8 +926,35 @@ void Positioner::updatePosition(QRect availableScreenRect)
     }
 
     m_view->setPosition(position);
+    m_lastRequestedPosition = position;
 
     if (m_view->surface()) {
+        if (m_forceCompositorPosition) {
+            //! KWin applies plasma-shell set_position on the next wl_surface commit and drops
+            //! it when it equals the last committed position, even if KWin has moved the
+            //! surface by itself meanwhile (e.g. during output hotplug). Commit a 1px
+            //! different position first, then the real one after that frame was committed.
+            m_forceCompositorPosition = false;
+            if (m_forcedPositionFrameConnection) {
+                QObject::disconnect(m_forcedPositionFrameConnection);
+            }
+            m_view->surface()->setPosition(position + QPoint(0, 1));
+
+            m_forcedPositionFrameConnection = connect(m_view, &QQuickWindow::frameSwapped, this, [this]() {
+                if (m_forcedPositionFrameConnection) {
+                    QObject::disconnect(m_forcedPositionFrameConnection);
+                }
+
+                if (m_view && m_view->surface()) {
+                    m_view->surface()->setPosition(m_lastRequestedPosition);
+                    m_view->update();
+                }
+            }, Qt::QueuedConnection);
+
+            m_view->update();
+            return;
+        }
+
         m_view->surface()->setPosition(position);
     }
 }

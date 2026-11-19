@@ -145,6 +145,8 @@ Q_SIGNALS:
 
 private Q_SLOTS:
     void onScreenChanged(QScreen *screen);
+    void onOutputLayoutChanged();
+    void reassertCompositorPosition();
     void onCurrentLayoutIsSwitching(const QString &layoutName);
     void onLastRepositionApplyEvent();
     void onStartupFinished();
@@ -203,6 +205,14 @@ private:
     QTimer m_screenSyncTimer;
     QTimer m_syncGeometryTimer;
     QTimer m_validateGeometryTimer;
+    //! Wayland: re-sends the dock position after the output layout settles,
+    //! because the compositor may move panel surfaces on its own while outputs
+    //! are added/removed/rearranged and never reports that back to the client.
+    QTimer m_outputLayoutSettleTimer;
+    int m_outputLayoutSettlePasses{0};
+    bool m_forceCompositorPosition{false};
+    QMetaObject::Connection m_forcedPositionFrameConnection;
+    QPoint m_lastRequestedPosition;
 
     //!used for relocation properties group
     bool m_repositionFromViewSettingsWindow{false};
