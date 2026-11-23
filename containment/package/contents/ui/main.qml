@@ -71,7 +71,17 @@ ContainmentItem {
         return (styleValue === 1 || styleValue === "1" || styleValue === "Modern") ? 1 : 0;
     }
     readonly property int currentDockStyleIndex: dockStyleToIndex(plasmoid.configuration.dockStyle)
-    readonly property bool isModernDockStyle: currentDockStyleIndex === 1
+    // Layouts saved before these options existed inherit their selected
+    // preset. An explicit option always takes precedence over that fallback.
+    function presetOptionEnabled(value) {
+        return value === -1 ? currentDockStyleIndex === 1 : value === 1;
+    }
+
+    readonly property bool singleRowLayoutEnabled: presetOptionEnabled(plasmoid.configuration.singleRowLayout)
+    readonly property bool roundedBackgroundEnabled: presetOptionEnabled(plasmoid.configuration.roundedBackground)
+    readonly property bool adaptiveItemSpacingEnabled: presetOptionEnabled(plasmoid.configuration.adaptiveItemSpacing)
+    readonly property bool automaticFloatingGapEnabled: presetOptionEnabled(plasmoid.configuration.automaticFloatingGap)
+    readonly property bool compactIndicatorsEnabled: presetOptionEnabled(plasmoid.configuration.compactIndicators)
     property bool modernAlignmentNormalizationGuard: false
 
     function normalizedAlignmentForModern(alignmentValue) {
@@ -79,7 +89,7 @@ ContainmentItem {
     }
 
     function enforceModernAlignmentCompatibility() {
-        if (!root.isModernDockStyle || root.modernAlignmentNormalizationGuard) {
+        if (!root.singleRowLayoutEnabled || root.modernAlignmentNormalizationGuard) {
             return false;
         }
 
@@ -496,7 +506,7 @@ ContainmentItem {
                 return;
             }
 
-            if (root.isModernDockStyle) {
+            if (root.singleRowLayoutEnabled) {
                 var effectiveAlignment = root.normalizedAlignmentForModern(latteView.alignment);
 
                 if (latteView.alignment !== effectiveAlignment) {
@@ -513,7 +523,7 @@ ContainmentItem {
                         parabolic.sglClearZoom();
                     }
 
-                    // Modern style keeps a single-main applets flow. The legacy
+                    // Keeping items together uses a single applet flow. The legacy
                     // three-layout split used for classic Justify can drift to
                     // side-only placement under Qt6 and ends up left/right aligned.
                     fastLayoutManager.joinLayoutsToMainLayout();
@@ -583,7 +593,7 @@ ContainmentItem {
         }
     }
 
-    onCurrentDockStyleIndexChanged: {
+    onSingleRowLayoutEnabledChanged: {
         if (root.inStartup) {
             return;
         }
@@ -594,7 +604,7 @@ ContainmentItem {
 
         layouter.appletsInParentChange = true;
 
-        if (root.isModernDockStyle) {
+        if (root.singleRowLayoutEnabled) {
             root.enforceModernAlignmentCompatibility();
             fastLayoutManager.joinLayoutsToMainLayout();
             root.forceModernAppletsToMainLayout();
@@ -760,12 +770,12 @@ ContainmentItem {
     }
 
     Containment.onAppletAdded: function(applet, geometryHint) {
-        // C++ drag-drop path sets _latte_pendingInsertionIndex before
-        // creating the applet.  Use it when present.
-        var pendingIndex = fastLayoutManager._latte_pendingInsertionIndex;
-        if (pendingIndex !== undefined && pendingIndex >= 0) {
+        // The C++ drag-drop and separator paths register a one-shot insertion
+        // request before creating the applet. Taking it consumes it, so this
+        // handler never has to write manager state back.
+        var pendingIndex = fastLayoutManager.takeAppletInsertionIndex();
+        if (pendingIndex >= 0) {
             fastLayoutManager.addAppletItem(applet, pendingIndex);
-            fastLayoutManager._latte_pendingInsertionIndex = undefined;
         } else {
             // Plasma 6: signal is appletAdded(Plasma::Applet*, const QRectF&).
             // The geometry hint is not used because Latte determines the
@@ -940,6 +950,8 @@ ContainmentItem {
         return true;
     }
 
+    // Older separately installed containment plugins may still call this root
+    // factory during a mixed upgrade; the current LayoutManager no longer uses it.
     function createJustifySplitter() {
         var splitter = appletItemComponent.createObject(root);
         splitter.internalSplitterId = internalViewSplittersCount()+1;
@@ -985,7 +997,7 @@ ContainmentItem {
     }
 
     function forceModernAppletsToMainLayout() {
-        if (!root.isModernDockStyle || !layoutsContainer || !layoutsContainer.mainLayout) {
+        if (!root.singleRowLayoutEnabled || !layoutsContainer || !layoutsContainer.mainLayout) {
             return;
         }
 
@@ -1735,6 +1747,7 @@ ContainmentItem {
 
     Ability.Layouter {
         id: _layouter
+        singleRowLayoutEnabled: root.singleRowLayoutEnabled
         animations: _animations
         indexer: _indexer
         layouts: layoutsContainer
@@ -1743,6 +1756,7 @@ ContainmentItem {
 
     Ability.Metrics {
         id: _metrics
+        adaptiveSpacing: root.adaptiveItemSpacingEnabled
         animations: _animations
         autosize: _autosize
         background: _background

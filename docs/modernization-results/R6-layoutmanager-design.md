@@ -369,18 +369,37 @@ Option 1 keeps the module layout, adds one interface, and lets each slice ship o
 - **Tests:** `containmentlayoutunittest` cases: a token is taken once; the skip flag is consumed by one `save()`; `addAppletItem(applet, -1)` uses the token when present.
 - **Desktop retest:** add a separator; drop a Widget Explorer entry at a position; drop launchers and files on the dock; repeat after a restart.
 
-### 7.5 S5: typed QML pushes for the drag path (start only after the profile in section 9)
+### 7.5 S5: typed QML pushes for the drag path (evaluated, not implemented)
 
-- **Change:** add typed `Q_PROPERTY` values with `NOTIFY` to `LayoutManager`: `viewAlignment` (int), `formFactor` (int), `viewObject` (`QObject *`, the `myView` item), and the layout spacing. Bind them in `main.qml:1202-1215`. Use them in `readConfigValue()` (`layoutmanager.cpp:471-500`) and `insertAtLayoutCoordinates()` (`:1593-1596`). Keep the configuration fallback and `alignmentFromVariant()` for unset values. The configured `alignment` is `Int` (`containment/package/contents/config/main.xml:8`), so the string branch is defensive.
+**Evaluated on 2026-11-20 and closed: the premise below does not hold.**
+`insertAtLayoutCoordinates()` contains no `readConfigValue()` call, and
+`readConfigValue("alignment")` is reached only from `requestAppletsOrder()`, so an
+applet drag — which sorts through `AppletItem.qml`'s `insertBefore()`/`insertAfter()`
+— never executes either access group this slice would type. A temporary probe
+recorded six event-driven alignment reads (median 5.71 µs) and zero samples on the
+insertion path. See [the S5 record](R6-layoutmanager-s5-evaluation.md) for the
+measurements and the corrected hot-path analysis. The plan below is kept as the
+original proposal, not as pending work.
+
+- **Change (proposed, not done):** add typed `Q_PROPERTY` values with `NOTIFY` to `LayoutManager`: `viewAlignment` (int), `formFactor` (int), `viewObject` (`QObject *`, the `myView` item), and the layout spacing. Bind them in `main.qml:1202-1215`. Use them in `readConfigValue()` (`layoutmanager.cpp:471-500`) and `insertAtLayoutCoordinates()` (`:1593-1596`). Keep the configuration fallback and `alignmentFromVariant()` for unset values. The configured `alignment` is `Int` (`containment/package/contents/config/main.xml:8`), so the string branch is defensive.
 - **Constraint:** the live-first order in `readConfigValue()` is deliberate; the comment at `layoutmanager.cpp:474-476` says KConfig can still hold the previous value during an alignment switch. The typed value must keep that order.
 - **Tests:** `containmentlayoutunittest` setters; a `QQmlComponent` test of the bindings is possible but not verified.
 - **Desktop retest:** change alignment while dragging a plasmoid and an applet.
 
-### 7.6 Later slices (not started)
+### 7.6 Later slices (evaluated 2026-11-20; none implemented)
 
 - **S6, typed layout-item base type (large, after S3):** a C++ `QQuickItem` base for layout slots with typed `isInternalViewSplitter`, `isParabolicEdgeSpacer`, `backendAppletRef` and `applet`. `AppletItem.qml` and `layouts/ParabolicEdgeSpacer.qml` derive from it. The QML root type changes, so review the 60 `qmllint` baseline entries for `AppletItem.qml` and check bindings and performance.
-- **S7, creation path in C++ (large, last):** replace `createAppletItem` and `initAppletContainer` with C++ creation from a typed `QQmlComponent*`, the C++ resolver, and a C++ retry timer in place of `Qt.createQmlObject` (`main.qml:813-833`). The opacity-based visibility (`main.qml:821-826`, `:838-843`) must be kept; the repository calls it deliberate (`docs/architecture-modernization-plan.md:122-124`).
-- **S8, conditional: parabolic per-event invocation.** Cache the `QMetaMethod` per item (`parabolic.cpp:72`, `:114`, `:211`) only if the profile in section 9 shows the lookups matter.
+- **S7, creation path in C++ (large, last) — evaluated, not started:** see
+  [the S7 record](R6-layoutmanager-s7-evaluation.md). The bodies that would move
+  own a `Qt.binding()` over dynamically resolved state plus a per-container retry
+  timer with no autotest coverage, so the slice is not the mechanical refactor the
+  name suggests.
+- **S7 (original wording):** replace `createAppletItem` and `initAppletContainer` with C++ creation from a typed `QQmlComponent*`, the C++ resolver, and a C++ retry timer in place of `Qt.createQmlObject` (`main.qml:813-833`). The opacity-based visibility (`main.qml:821-826`, `:838-843`) must be kept; the repository calls it deliberate (`docs/architecture-modernization-plan.md:122-124`).
+- **S8, conditional: parabolic per-event invocation — measured, closed.** Cache the
+  `QMetaMethod` per item (`parabolic.cpp:72`, `:114`, `:211`) only if the profile
+  shows the lookups matter. They do not: over 7831 hover samples the lookup is
+  0.59 % of a 196 µs invocation. See
+  [the S8 record](R6-layoutmanager-s8-evaluation.md).
 
 ### 7.7 Desktop retest list for S2 to S4 (run by the user, per AGENTS.md)
 

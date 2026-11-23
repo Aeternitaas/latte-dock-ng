@@ -30,19 +30,43 @@ Item{
 
     readonly property int maxSize: Math.max(0,Math.ceil(0.55*abilityItem.abilities.metrics.iconSize) - abilityItem.abilities.metrics.totals.lengthEdges)
 
-    Binding{
+    property real settledSeparatorSpace: 0
+    readonly property bool retainingSeparatorSpace: itemIndex < 0 && abilityItem.keepSeparatorSpacingOnRemoval
+
+    // This component's own properties are referenced through "hiddenSpacer."
+    // inside the Binding expressions below. The unqualified spellings are
+    // resolved only through the surrounding context, which qmllint reports as
+    // unqualified accesses and the reviewed baseline would then grow for
+    // properties this file declares itself.
+    Binding {
+        target: hiddenSpacer
+        property: "settledSeparatorSpace"
+        // Indexer publishes the neighbouring indexes in stages. Keep the
+        // previous separator space through settling and through a row handoff.
+        when: !hiddenSpacer.retainingSeparatorSpace && (itemIndex < 0 || !hiddenSizeDelayer.running)
+        restoreMode: Binding.RestoreNone
+        value: itemIndex < 0 ? 0 : hiddenSpacer.separatorSpace
+    }
+
+    Binding {
         target: hiddenSpacer
         property: "nHiddenSize"
-        when: !hiddenSizeDelayer.running && itemIndex > -1 //! helps to solve BUGLOCALREF: #1
         value: {
-            if (abilityItem.isHidden) {
+            if (abilityItem.isHidden || (itemIndex < 0 && !hiddenSpacer.retainingSeparatorSpace)) {
                 return 0;
-            } else if (!abilityItem.parabolicItem.isUpdatingOnlySpacers) {
-                return (nScale > 0) ? (maxSize * nScale) + separatorSpace : separatorSpace;
-            } else {
-                return (nScale > 0) ? (abilityItem.abilities.metrics.iconSize * nScale) + separatorSpace : separatorSpace;
             }
+            if (itemIndex < 0) {
+                return hiddenSpacer.settledSeparatorSpace;
+            }
+            const scaleLength = abilityItem.parabolicItem.isUpdatingOnlySpacers
+                              ? abilityItem.abilities.metrics.iconSize : hiddenSpacer.maxSize;
+            return hiddenSpacer.settledSeparatorSpace + Math.max(0, hiddenSpacer.nScale) * scaleLength;
         }
+    }
+
+    function inheritSeparatorSpace(previousSpacer) {
+        hiddenSizeDelayer.restart();
+        settledSeparatorSpace = previousSpacer.settledSeparatorSpace;
     }
 
     Connections{

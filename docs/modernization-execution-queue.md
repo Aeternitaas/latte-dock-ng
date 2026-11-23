@@ -186,6 +186,56 @@ subsequent T4d changes.
   passed fixture and production scans on LLVM 18 and 22. Three local paired
   runs showed no large wall-time increase, but CI cost and its budget remain
   unestablished; the check has not been promoted.
+- T5 promotion: [unchecked optional access](modernization-results/T5-optional-promotion.md)
+  **Complete locally, CI-version acceptance pending the push.** The check is the
+  fifty-sixth gated check, with a proven negative fixture and no finding in 157
+  production sources on clang-tidy 22.1.8; three new order-alternated pairs put
+  the 55-to-56 increment below measurement resolution (differences +0.042,
+  -0.220, -0.299 s). All four presets build with zero compiler warnings and pass
+  65/65 CTest each. LLVM 18.1.3 is unavailable here; the `clang-debug` clang-tidy
+  step on the push is the first 18.1.3 gate over this source. The Band B cost
+  budget governs promoting families, not this single proven check.
+
+- P1b measurement foundation: [KSycoca validity rule](modernization-results/P1b-measurement-foundation.md)
+  **Complete locally.** `scripts/measure-process-family.py` now marks a window that
+  overlaps a `~/.cache/ksycoca6_*` rewrite as invalid (the un-diagnosable part of
+  P1b's outlier), pinned by `autotests/test_measure_process_family.py`
+  (`measurefamilyrulestest`, 6 cases, two mutations caught). Four presets build with
+  zero compiler warnings and pass 66/66 CTest each. A **live positive case** was
+  produced on a user-provided Arch Plasma 6.8.3 VM: a forced rebuild inside a window
+  was reported as `"valid": false` with the exact file and second. This supplies the
+  launch-environment half only; P1b still needs a clean-environment rerun and an
+  event-latency seam.
+
+- VM validation (2026-11-21): [Debian 13.7 and Arch Plasma 6.8 results](modernization-results/VM-validation-2026-11-21.md).
+  Debian: clang-tidy 18.1.8 passes the 56-check gate with 0 compiler warnings and
+  CTest 65/66 (the one failure is an image accessibility-bridge gap proven by a
+  standalone probe). Arch: the Clang Debug build is clean, and the known LLVM 23
+  deprecated-check transition reproduces with an exact message.
+
+- T4l LLVM 23 renamed check: [record](modernization-results/T4l-llvm23-renamed-check.md)
+  **Complete.** `performance-faster-string-find` is deprecated in LLVM 23 and absent
+  under that name's successor in 18/22, so `.clang-tidy` keeps the successor and the
+  runner substitutes the working predecessor when the tool lacks it (`RENAMED_CHECKS`,
+  capability-probed, fail-closed). The gate now passes on clang-tidy 18.1.8 (Debian),
+  22.1.8 (host) and 23.1.5 (Arch, which previously failed before analysing a source).
+  `clangtidyrenamestest` adds six cases; three mutations are caught. Four presets: 0
+  compiler warnings, 67/67 CTest each. T5 was published in
+  `564199ec1`; Build run 44863409259 passed the Clang Debug clang-tidy step (CI image
+  clang-tidy 18.1.3), closing T5. Its GCC Debug/Release jobs failed before
+  `actions/checkout` on the KDE Neon repository and dependency install, which is
+  infrastructure and unrelated to the source.
+
+- Neon bootstrap contracts: [record](modernization-results/T-Neon-bootstrap-contracts.md)
+  **Complete.** Three consecutive CI runs on 2026-11-21 lost jobs at the KDE Neon
+  steps while the mirror answered HTTP 502. Two defects were found in the workflow
+  itself: the first `apt-get update` ran before `Acquire::Retries` was written (so
+  the base indexes were never retried - this is what failed the QML lint job), and
+  the ~30-line Neon bootstrap was duplicated across two steps with no guard. The
+  policy now precedes the update, and `neonrepositorytest` pins both copies
+  byte-identical and the ordering. 7/7 cases, two mutations caught; four presets
+  pass 68/68 CTest each. Published as `7293f8361`; Build run 44878284519 passed
+  all 23 jobs, including the QML lint step that the ordering defect had broken.
 
 - Tooling follow-up: CMake 4.5 emits four author warnings about QML typeinfo
   install-preparation dependencies. On Arch a verified clean `install_prep/all`
@@ -194,13 +244,45 @@ subsequent T4d changes.
   without suppressing them or raising the existing CMake floor.
   [Evidence](modernization-results/T4h-data/arch/cmake45/install-prep-qmltypes.md).
 
+## Continuation (2026-11-16–17)
+
+The continuation started from `main` at `0a6974f5cd1b13116764a2320e3d882674f5fed3`
+with a clean working tree. Workers use `gpt-6-luna` with `medium` reasoning;
+the coordinator owns integration and review. On 2026-11-17 the user explicitly
+authorized commit and push after each completed task unless manual validation
+is required; this does not authorize a release or tag.
+
+- P4 A/A baseline: **Complete as a measurement slice**, published in
+  `ebb736602`. Five same-build Fedora Plasma/KWin 6.8.3 runs passed the
+  observer, identity, cache and artifact gates. The earlier 6.8.2 runs remain
+  separate after an intervening package upgrade. The [baseline](modernization-results/P4-fedora-aa-baseline.md)
+  records raw data, limitations and the resolution of zero whole CPU ticks;
+  it establishes no saving and does not complete the deferred P4 optimization.
+  Build CI for `ebb736602` is tracked separately.
+- T4k: [QML metadata producer dependencies](modernization-results/T4k-qmltypes-install-dependencies.md)
+  are **Complete**: clean genuine CMake 4.5/GCC on Fedora and CMake 4.5/Clang
+  on the host passed Release install preparation and both-root staged metadata
+  checks, independently reviewed by the coordinator. GCC/Clang Debug builds
+  on CMake 4.3.4 each passed 64/64 tests with zero compiler diagnostics. Host
+  QML tooling diagnostics remain recorded; no Release CTest or desktop retest
+  is claimed for this build/install-only slice.
+
+Post-publication CI repair: the P4 evidence commit introduced 11 archived
+`.qml` copies under `docs/modernization-results/`, which expanded both lint
+inventories and caused Deep QML lint to reject its 244-file baseline. The
+[repair record](modernization-results/P4-qmllint-ci-inventory.md) documents a
+shared inventory helper that excludes only that archive subtree, keeps the
+baseline unchanged, and adds an isolated Git inventory test. Host GCC and Clang
+Debug each pass 65/65 tests; the Nix check and CI-version deep lint require the
+post-push Build workflow. No desktop behavior changed.
+
 ## Later waves
 
 | Task group | Separate slices | Entry condition |
 | --- | --- | --- |
 | T2-T3 | Remaining Band A checks, approximately 15 per slice | T1 accepted; each slice repeats fixture and current-production proof |
 | T4 | Fix and then gate one R8c check at a time | Review every finding; preserve documented intentional calls |
-| T5 | Band B, standalone analyzer, then Band C/unpriced candidates | Explicit CI cost budget and individual fixture proof |
+| T5 | Band B remaining checks, standalone analyzer, then Band C/unpriced candidates | For each further promotion: individual fixture proof and a measured cost argument; the first Band B check (unchecked optional access) is promoted |
 | A2 | Bounded pre-filter message capture, then one filter family | Established emitter/version evidence; remove temporary instrumentation |
 | A3 | Saved-layout fixtures, then one legacy splitter branch family | Consumer trace and Justify/separator/drag desktop coverage |
 | P1b | Resolve Release A/B noise and event-correlated latency | Comparable repeated runs; distinguish reduced work from CPU/PSS savings |
@@ -208,7 +290,7 @@ subsequent T4d changes.
 | P4 | Shared task-query evaluation, then a bounded implementation if justified | Paired Release work and CPU/PSS evidence, accepted ownership design |
 | P5 | Effect allocation/frame measurement, then a bounded implementation | Supported on/off measurement and visual acceptance |
 | P6 | Module cold/warm measurement and override-safe build prototype | Demonstrated module-specific Release cost |
-| M6/A5/R6 | Select one useful dependency or ownership boundary | Measured benefit and accepted narrow design; documents alone are not implementation |
+| M6/A5/R6 | Select one useful dependency or ownership boundary | Measured benefit and accepted narrow design; documents alone are not implementation. For R6 the remaining LayoutManager slices are S5 (needs the drag profile), S6 and S7; S1–S4 are implemented |
 
 R8j remains closed at the user's decision. Its unrun 60-window experiment is
 not a scheduled task. A new memory investigation requires its own design and
@@ -227,6 +309,82 @@ justify resource measurement or a shared-query implementation.
 P6's [scratch Release build preflight](modernization-results/P6-scratch-build-baseline.md)
 establishes a local build baseline only; it does not measure module-attributable
 runtime import cost or justify a build-system change.
+
+## R6 LayoutManager continuation (2026-11-20)
+
+S3 was already accepted when the execution queue was written; the next named
+action was S4.
+
+- R6-S4: [typed one-shot insertion protocol](modernization-results/R6-layoutmanager-s4.md)
+  replaces `_latte_pendingInsertionIndex` and `_latte_skipSpacerReorder` with
+  typed `LayoutManagerApi` members (IID `.../1.1`) owned by the manager and
+  written only through `LayoutManagerApiDispatcher`; the dispatcher keeps the
+  dynamic-property fallback for a pre-S4 plugin, and both creation sites drop
+  an unconsumed request, closing the stale-index hazard in the
+  [design](modernization-results/R6-layoutmanager-design.md#-family-4-name-channels-in-both-directions-dynamic-properties-and-qml-binding--property-).
+  QML, registered names and persisted keys are unchanged. **Complete except**
+  the user's desktop interaction retest (design §7.4) and the clazy and
+  clang-tidy gates: `clazy-standalone` is not installed on this host, so
+  `scripts/test-clazy.py` aborts and neither gate ran here. GCC and Clang Debug
+  full builds have zero compiler warnings and pass 65/65 CTest each; the
+  qmllint errors-only gate is clean on 244 files; a user-mode Debug startup
+  logged both containment orders with no warning or error entries.
+- R6-S5: [measured, not implemented](modernization-results/R6-layoutmanager-s5-evaluation.md).
+  The slice was gated on a drag profile. The profile disproves its premise:
+  `insertAtLayoutCoordinates()` contains no `readConfigValue()` call, and
+  `readConfigValue("alignment")` is reached only from `requestAppletsOrder()`,
+  which an applet drag never runs (`AppletItem.qml` sorts with
+  `insertBefore()`/`insertAfter()`). A temporary probe collected six
+  event-driven alignment-read samples (median 5.71 µs) and **zero** samples of
+  the insertion-path reads. Probe removed, user installation uninstalled, no
+  source change: **S5 is closed as unjustified**.
+- Next action: the user runs the S4 desktop retest; the published CI run then
+  owns the clazy/clang-tidy gates. The per-drag name calls the profile did find
+  (`insertBefore`/`insertAfter`, `createAppletItem`, `initAppletContainer`)
+  belong to S7, not S5.
+- R6-S6: [evaluated, not recommended as written](modernization-results/R6-layoutmanager-s6-evaluation.md).
+  The sixteen name-based layout-child reads all sit in structural functions, so
+  the slice has no performance case either; its value is type safety. It costs a
+  new registered QML type, both root types (`AppletItem.qml` at 2077 lines and
+  `layouts/ParabolicEdgeSpacer.qml`) and all 60 qmllint baseline entries for
+  `AppletItem.qml`. The same defect class — a renamed property silently reading
+  as false — can be closed with missing-property diagnostics in the manager, the
+  shape S1 already used for the root functions, without changing any QML.
+- R6-S6 (implemented as diagnostics): `LayoutManager::noteLayoutChildRoles()`
+  reports once per role a layout child stops declaring, using the same shape S1
+  used for the root functions. A first draft demanded every role of every child
+  and produced two false warnings on a real desktop, because a parabolic edge
+  spacer never has `backendAppletRef`; the role list is now per class and
+  `edgeSpacerNeedsNoBackendAppletRole` pins it. No QML and no qmllint baseline
+  changed. GCC/Clang Debug: zero compiler warnings, 65/65 CTest each; qmllint
+  gate OK; a user-mode Debug run logged 0 role warnings. The typed base class
+  itself is not started.
+- R6-S7: [evaluated, not started](modernization-results/R6-layoutmanager-s7-evaluation.md).
+  Moving the creation functions to C++ does not remove the QML-engine boundary:
+  their bodies own a `Qt.binding()` over `status`, `isHidden` and
+  `keepVisibleOnHiddenStatus`, where `status` is itself resolved dynamically, and
+  a per-container retry timer whose path no autotest covers. The opacity-based
+  visibility is deliberate. The functions are also a compatibility surface for
+  separately installed plugins.
+- R6-S8: [measured, not implemented](modernization-results/R6-layoutmanager-s8-evaluation.md).
+  This is the repository's only per-pointer-move named call, so it was worth
+  measuring: over 7831 hover samples `indexOfMethod()` costs 1.11 µs and
+  `method()` 0.055 µs against a 196 µs invocation (0.59 %). Caching the method
+  would save ~1.2 µs of a 16.7 ms frame, below noise. The remaining 196 µs is the
+  QML parabolic computation, a separate candidate.
+- Parabolic computation (candidate, now measured): 196 µs p50 on Debug versus
+  184 µs p50 on Release across 958 samples each. A 6 % gap means the cost is QML
+  interpretation and JavaScript allocation, not compiled arithmetic, so a C++
+  port of `applyParabolicEffect()` would not reach it and would cross the same
+  engine boundary S7 rejected. Closed as unjustified; a future attempt must
+  reduce per-move work instead. During this measurement a Release binary was run
+  against the Debug `dev-env.sh` QML overlay, which broke window previews until
+  the packaged dock was restored; the record documents that and the leftover
+  state it created.
+- Next action: this round of R6 is closed on evidence — S1–S4 implemented, S6
+  shipped as diagnostics, S5/S7/S8 recorded as measured or assessed negatives.
+  Nothing in this queue is blocked on the user. A future slice needs its own
+  accepted design and, for the parabolic computation, a Release profile.
 
 ## References
 

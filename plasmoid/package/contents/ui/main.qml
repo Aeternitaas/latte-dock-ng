@@ -480,6 +480,14 @@ PlasmoidItem {
         return false;
     }
 
+    function outgoingTaskRowReplacement(incomingTask, includeLiveRows) {
+        if (!incomingTask) {
+            return null;
+        }
+
+        return _tasksExtendedManager.findAdjacentTaskRowReplacement(incomingTask, icList.contentItem.children, includeLiveRows);
+    }
+
     function isFilterableActivityId(activityId) {
         if (activityId === undefined || activityId === null) {
             return false;

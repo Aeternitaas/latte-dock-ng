@@ -1557,8 +1557,8 @@ void View::updatePlasmoidDrag()
         return;
     }
 
-    QObject *lm = m_interface->layoutManager();
-    QQuickItem *dndSpacer = lm->property("dndSpacerItem").value<QQuickItem *>();
+    auto *lm = m_interface->layoutManagerDispatcher();
+    QQuickItem *dndSpacer = lm->dndSpacer();
 
     if (!dndSpacer) {
         return;
@@ -1569,15 +1569,12 @@ void View::updatePlasmoidDrag()
     dndSpacer->setOpacity(1.0);
 
     // Map from window coords to rootItem coords for accurate positioning
-    QQuickItem *rootItem = lm->property("rootItem").value<QQuickItem *>();
+    QQuickItem *rootItem = lm->rootItem();
     QPointF mappedPos = (rootItem && contentItem())
                         ? rootItem->mapFromItem(contentItem(), m_lastPlasmoidDragPos)
                         : m_lastPlasmoidDragPos;
 
-    QMetaObject::invokeMethod(lm, "insertAtCoordinates",
-                              Q_ARG(QQuickItem*, dndSpacer),
-                              Q_ARG(int, (int)mappedPos.x()),
-                              Q_ARG(int, (int)mappedPos.y()));
+    lm->insertAtCoordinates(dndSpacer, static_cast<int>(mappedPos.x()), static_cast<int>(mappedPos.y()));
 }
 
 void View::handlePlasmoidDrop(QDropEvent *de)
@@ -1594,29 +1591,24 @@ void View::handlePlasmoidDrop(QDropEvent *de)
     int eventy = (int)de->position().y();
 
     // Compute insertion index from dndSpacer position, then clean it up.
-    // createApplet() returns the Applet* synchronously, and we call
-    // LayoutManager::addAppletItem() directly with the insertion index.
-    // The later Containment.onAppletAdded signal will be a no-op because
-    // the applet container already exists.
+    // createApplet() returns the Applet* synchronously; addAppletItem() places
+    // the dropped applet through the one-shot insertion request registered below.
     int dndIndex = -1;
 
     if (m_interface->layoutManager()) {
-        QObject *lm = m_interface->layoutManager();
-        QQuickItem *dndSpacer = lm->property("dndSpacerItem").value<QQuickItem *>();
+        auto *lm = m_interface->layoutManagerDispatcher();
+        QQuickItem *dndSpacer = lm->dndSpacer();
 
         if (dndSpacer) {
             // Map from window coords to rootItem coords for accurate positioning
-            QQuickItem *rootItem = lm->property("rootItem").value<QQuickItem *>();
+            QQuickItem *rootItem = lm->rootItem();
             QPointF mappedPos = (rootItem && contentItem())
                                 ? rootItem->mapFromItem(contentItem(), QPointF(eventx, eventy))
                                 : QPointF(eventx, eventy);
 
-            QMetaObject::invokeMethod(lm, "insertAtCoordinates",
-                                      Q_ARG(QQuickItem*, dndSpacer),
-                                      Q_ARG(int, (int)mappedPos.x()),
-                                      Q_ARG(int, (int)mappedPos.y()));
+            lm->insertAtCoordinates(dndSpacer, static_cast<int>(mappedPos.x()), static_cast<int>(mappedPos.y()));
 
-            QMetaObject::invokeMethod(lm, "dndSpacerIndex", Q_RETURN_ARG(int, dndIndex));
+            dndIndex = lm->dndSpacerIndex();
 
             // Reset dndSpacer — we will insert via addAppletItem(index) directly
             dndSpacer->setOpacity(0.0);
@@ -1627,17 +1619,19 @@ void View::handlePlasmoidDrop(QDropEvent *de)
         }
     }
 
-    // Set pending insertion index on the layout manager BEFORE createApplet().
+    // Register the insertion request on the layout manager BEFORE createApplet().
     // The Containment.onAppletAdded signal fires during createApplet() with
-    // default (0,0) coordinates.  addAppletItem checks for the pending index
-    // and uses it instead, achieving position-aware insertion at the drop point.
-    if (dndIndex >= 0 && m_interface->layoutManager()) {
-        m_interface->layoutManager()->setProperty("_latte_pendingInsertionIndex", dndIndex);
+    // default (0,0) coordinates and addAppletItem() uses the request instead,
+    // achieving position-aware insertion at the drop point.
+    auto *layoutManager = m_interface->layoutManagerDispatcher();
+
+    if (dndIndex >= 0) {
+        layoutManager->expectAppletInsertionAt(dndIndex);
     }
 
-    // Create the applet.  The Containment.onAppletAdded handler in main.qml
-    // calls addAppletItem() with default (0,0) but our pending index override
-    // in addAppletItem(QObject*,int,int) redirects to addAppletItem(index).
+    // Create the applets. The Containment.onAppletAdded handler resolves
+    // addAppletItem(QObject*,int,int), whose request override redirects to
+    // addAppletItem(index), so the dropped applet gets the computed slot.
     const QString data = QString::fromUtf8(de->mimeData()->data(QStringLiteral("text/x-plasmoidservicename")));
     const QStringList names = data.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
 
@@ -1646,6 +1640,10 @@ void View::handlePlasmoidDrop(QDropEvent *de)
             cont->createApplet(name);
         }
     }
+
+    // A creation that reported no applet never consumed the request; drop it so
+    // the next applet cannot be placed at this drop's index.
+    layoutManager->expectAppletInsertionAt(-1);
 }
 
 void View::cleanupDndSpacer()
@@ -1654,12 +1652,12 @@ void View::cleanupDndSpacer()
         return;
     }
 
-    QObject *lm = m_interface->layoutManager();
-    QQuickItem *dndSpacer = lm->property("dndSpacerItem").value<QQuickItem *>();
+    auto *lm = m_interface->layoutManagerDispatcher();
+    QQuickItem *dndSpacer = lm->dndSpacer();
 
     if (dndSpacer) {
         dndSpacer->setOpacity(0.0);
-        QQuickItem *rootItem = lm->property("rootItem").value<QQuickItem *>();
+        QQuickItem *rootItem = lm->rootItem();
 
         if (rootItem) {
             dndSpacer->setParentItem(rootItem);

@@ -9,6 +9,7 @@ Item {
     id: appletsContainer
 
     property Item grid: null
+    required property bool singleRowLayoutEnabled
 
     // items in grid
     readonly property int count: grid.children.length
@@ -36,7 +37,11 @@ Item {
     Binding{
         target: appletsContainer
         property:"sizeWithNoFillApplets"
-        when: appletsContainer && grid && !updateIsBlocked && inNormalFillCalculationsState
+        // The single-row layout allocates fill slots during length animations. Its budget
+        // must still include the fixed applets, or this binding restores zero
+        // and the task viewport expands back to its full content length.
+        when: appletsContainer && grid && !updateIsBlocked
+              && (inNormalFillCalculationsState || appletsContainer.singleRowLayoutEnabled)
         value: {
             var space = 0;
             for (var i=0; i<grid.children.length; ++i){

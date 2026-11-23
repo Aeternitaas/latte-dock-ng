@@ -32,6 +32,7 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QLatin1String>
+#include <QScopedValueRollback>
 #include <QSet>
 #include <QStringList>
 #include <QStandardPaths>
@@ -376,7 +377,7 @@ void ContainmentInterface::identifyShortcutsHost()
     QQuickItem *searchRoot{nullptr};
 
     if (m_layoutManager) {
-        searchRoot = m_layoutManager->property("rootItem").value<QQuickItem *>();
+        searchRoot = m_layoutManagerDispatcher.rootItem();
     }
 
     if (!searchRoot) {
@@ -739,7 +740,7 @@ int ContainmentInterface::appletIdForAppletIndex(const int appletIndex) const
     }
 
     if (m_layoutManager) {
-        const QList<int> layoutOrder = m_layoutManager->property("order").value<QList<int >> ();
+        const QList<int> layoutOrder = m_layoutManagerDispatcher.order();
         if (appletIndex >= 0 && appletIndex < layoutOrder.count()) {
             const int appletId = layoutOrder.at(appletIndex);
 
@@ -1000,6 +1001,11 @@ QObject *ContainmentInterface::layoutManager() const
     return m_layoutManager;
 }
 
+LayoutManagerApiDispatcher *ContainmentInterface::layoutManagerDispatcher()
+{
+    return &m_layoutManagerDispatcher;
+}
+
 void ContainmentInterface::setLayoutManager(QObject *manager)
 {
     if (m_layoutManager == manager) {
@@ -1007,6 +1013,7 @@ void ContainmentInterface::setLayoutManager(QObject *manager)
     }
 
     m_layoutManager = manager;
+    m_layoutManagerDispatcher.setObject(manager);
 
     if (!m_layoutManager) {
         Q_EMIT layoutManagerChanged();
@@ -1058,7 +1065,7 @@ void ContainmentInterface::setLayoutManager(QObject *manager)
     Q_EMIT layoutManagerChanged();
 }
 
-void ContainmentInterface::addApplet(const QString &pluginId)
+void ContainmentInterface::addApplet(const QString &pluginId, int beforeAppletId)
 {
     qCDebug(latteView) << "org.kde.sync containment addApplet(plugin)"
                        << "containment" << (m_view && m_view->containment() ? m_view->containment()->id() : 0)
@@ -1069,18 +1076,31 @@ void ContainmentInterface::addApplet(const QString &pluginId)
         return;
     }
 
-    // Calculate the default insertion index and set it BEFORE creating the
+    if (beforeAppletId > 0 && Latte::PluginId::isSeparatorPluginId(pluginId)) {
+        insertBoundarySeparatorBeforeApplet(beforeAppletId, false);
+        return;
+    }
+
+    // Calculate the default insertion index and register it BEFORE creating the
     // applet so the QML handler's addAppletItem call places it correctly.
     if (m_layoutManager) {
-        QList<int> order = m_layoutManager->property("order").value<QList<int >> ();
+        QList<int> order = m_layoutManagerDispatcher.order();
         if (!order.isEmpty()) {
-            int defaultIndex = calculateDefaultAppletInsertionIndex(order);
-            m_layoutManager->setProperty("_latte_pendingInsertionIndex", defaultIndex);
+            const int defaultIndex = calculateDefaultAppletInsertionIndex(order);
+            m_layoutManagerDispatcher.expectAppletInsertionAt(defaultIndex);
         }
     }
 
     suppressNextAppletCreatedSignal();
     Plasma::Applet *createdApplet = m_view->containment()->createApplet(pluginId);
+
+    //! Plasma reports success synchronously, but no applet means no addAppletItem
+    //! call consumed the request; dropping it keeps the next applet from landing
+    //! on this stale index.
+    if (!createdApplet) {
+        m_layoutManagerDispatcher.expectAppletInsertionAt(-1);
+    }
+
     qCDebug(latteView) << "org.kde.sync containment createApplet(plugin) result"
                        << "containment" << (m_view && m_view->containment() ? m_view->containment()->id() : 0)
                        << "screen" << (m_view && m_view->screen() ? m_view->screen()->name() : QStringLiteral("<none>"))
@@ -1129,6 +1149,11 @@ void ContainmentInterface::addApplet(QObject *metadata, int x, int y)
 
 bool ContainmentInterface::addInternalSeparatorBeforeApplet(const int appletId)
 {
+    return insertBoundarySeparatorBeforeApplet(appletId, true);
+}
+
+bool ContainmentInterface::insertBoundarySeparatorBeforeApplet(int appletId, bool propagateCreation)
+{
     if (!m_view || !m_view->containment() || appletId < 0) {
         return false;
     }
@@ -1136,7 +1161,7 @@ bool ContainmentInterface::addInternalSeparatorBeforeApplet(const int appletId)
     QList<int> layoutOrder;
 
     if (m_layoutManager) {
-        layoutOrder = m_layoutManager->property("order").value<QList<int>>();
+        layoutOrder = m_layoutManagerDispatcher.order();
     }
 
     const QList<int> effectiveOrder = bestOrderForApplet(m_appletOrder, layoutOrder, appletId);
@@ -1197,7 +1222,7 @@ bool ContainmentInterface::addInternalSeparatorBeforeApplet(const int appletId)
 
     const QStringList separatorPlugins{ QLatin1String(Latte::PluginId::kSeparator) };
 
-    //! Set pending insertion index so that onAppletAdded (fired synchronously
+    //! Register the insertion request so that onAppletAdded (fired synchronously
     //! during createApplet) places the separator at the correct target position
     //! immediately, avoiding the default "end of left-side widgets" fallback
     //! and the jitter from multiple asynchronous setAppletsOrder repositionings.
@@ -1207,14 +1232,28 @@ bool ContainmentInterface::addInternalSeparatorBeforeApplet(const int appletId)
     //! Grid recalculation within addAppletItem, producing the visible
     //! back-and-forth icon oscillation perceived as jitter.
     if (m_layoutManager) {
-        m_layoutManager->setProperty("_latte_pendingInsertionIndex", targetIndex);
-        m_layoutManager->setProperty("_latte_skipSpacerReorder", true);
+        m_layoutManagerDispatcher.expectAppletInsertionAt(targetIndex);
+        m_layoutManagerDispatcher.expectSkipSpacerReorderOnce();
     }
 
     Plasma::Applet *separatorApplet{nullptr};
 
     for (const QString &pluginId : separatorPlugins) {
+        // The requested neighbor is authoritative during synchronous creation.
+        // The layout's one-shot index may already be consumed by the time the
+        // applet is announced. A mirror also needs the deferred order repair
+        // below if its QML container is not ready when Plasma emits appletAdded.
+        const QScopedValueRollback anchor(m_boundarySeparatorBeforeAppletId, appletId);
+        const int existingSuppressions = m_suppressedAppletCreations;
+        if (!propagateCreation) {
+            suppressNextAppletCreatedSignal();
+        }
+
         separatorApplet = m_view->containment()->createApplet(pluginId);
+
+        if (!propagateCreation && m_suppressedAppletCreations > existingSuppressions) {
+            --m_suppressedAppletCreations;
+        }
 
         if (separatorApplet && !separatorApplet->failedToLaunch()) {
             break;
@@ -1226,12 +1265,12 @@ bool ContainmentInterface::addInternalSeparatorBeforeApplet(const int appletId)
         }
     }
 
-    // Clear the pending index and spacer-reorder suppression if they were
-    // not consumed (e.g. applet creation raced or a different code path
-    // cleared them already).
+    // Drop the insertion request if no creation consumed it (e.g. the plugin
+    // rejected the separator plugin). The manager's spacer suppression stays
+    // set until the next save() consumes it, which is the documented one-shot
+    // behaviour and cannot outlive the operation's own save().
     if (m_layoutManager) {
-        m_layoutManager->setProperty("_latte_pendingInsertionIndex", QVariant());
-        m_layoutManager->setProperty("_latte_skipSpacerReorder", QVariant());
+        m_layoutManagerDispatcher.expectAppletInsertionAt(-1);
     }
 
     if (!separatorApplet) {
@@ -1257,7 +1296,7 @@ bool ContainmentInterface::addInternalSeparatorBeforeApplet(const int appletId)
     m_cleaningSeparatorApplets = true;
 
     //! Apply the new order once after a brief delay to give the separator
-    //! QQuickItem (placed by addAppletItem via _latte_pendingInsertionIndex)
+    //! QQuickItem (placed by addAppletItem through the insertion request)
     //! time to initialize, then persist to config.
     QTimer::singleShot(30, this, [this, newOrder]() {
         setAppletsOrder(newOrder);
@@ -1280,7 +1319,7 @@ bool ContainmentInterface::addInternalSeparatorAtLeftBoundaryOfApplet(const int 
     QList<int> layoutOrder;
 
     if (m_layoutManager) {
-        layoutOrder = m_layoutManager->property("order").value<QList<int>>();
+        layoutOrder = m_layoutManagerDispatcher.order();
     }
 
     const QList<int> effectiveOrder = bestOrderForApplet(m_appletOrder, layoutOrder, appletId);
@@ -1359,7 +1398,7 @@ bool ContainmentInterface::addInternalSeparatorAtRightBoundaryOfApplet(const int
     QList<int> layoutOrder;
 
     if (m_layoutManager) {
-        layoutOrder = m_layoutManager->property("order").value<QList<int>>();
+        layoutOrder = m_layoutManagerDispatcher.order();
     }
 
     const QList<int> effectiveOrder = bestOrderForApplet(m_appletOrder, layoutOrder, appletId);
@@ -1438,7 +1477,7 @@ bool ContainmentInterface::removeInternalSeparatorAtLeftBoundaryOfApplet(const i
     QList<int> layoutOrder;
 
     if (m_layoutManager) {
-        layoutOrder = m_layoutManager->property("order").value<QList<int>>();
+        layoutOrder = m_layoutManagerDispatcher.order();
     }
 
     const QList<int> effectiveOrder = bestOrderForApplet(m_appletOrder, layoutOrder, appletId);
@@ -1527,7 +1566,7 @@ bool ContainmentInterface::removeInternalSeparatorAtRightBoundaryOfApplet(const 
     QList<int> layoutOrder;
 
     if (m_layoutManager) {
-        layoutOrder = m_layoutManager->property("order").value<QList<int>>();
+        layoutOrder = m_layoutManagerDispatcher.order();
     }
 
     const QList<int> effectiveOrder = bestOrderForApplet(m_appletOrder, layoutOrder, appletId);
@@ -1693,7 +1732,7 @@ void ContainmentInterface::cleanupInvalidSeparatorApplets()
         return;
     }
 
-    const QList<int> currentOrder = m_layoutManager->property("order").value<QList<int >> ();
+    const QList<int> currentOrder = m_layoutManagerDispatcher.order();
     if (currentOrder.isEmpty()) {
         return;
     }
@@ -1848,7 +1887,7 @@ void ContainmentInterface::updateAppletsOrder()
         return;
     }
 
-    QList<int> neworder = m_layoutManager->property("order").value<QList<int >> ();
+    QList<int> neworder = m_layoutManagerDispatcher.order();
 
     QHash<int, QString> containmentPlugins;
 
@@ -1903,7 +1942,7 @@ void ContainmentInterface::updateAppletsInLockedZoom()
         return;
     }
 
-    QList<int> appletslockedzoom = m_layoutManager->property("lockedZoomApplets").value<QList<int >> ();
+    QList<int> appletslockedzoom = m_layoutManagerDispatcher.lockedZoomApplets();
 
     if (m_appletsInLockedZoom == appletslockedzoom) {
         return;
@@ -1961,7 +2000,7 @@ void ContainmentInterface::updateAppletsDisabledColoring()
         return;
     }
 
-    QList<int> appletsdisabledcoloring = m_layoutManager->property("userBlocksColorizingApplets").value<QList<int >> ();
+    QList<int> appletsdisabledcoloring = m_layoutManagerDispatcher.userBlocksColorizingApplets();
 
     if (m_appletsDisabledColoring == appletsdisabledcoloring) {
         return;
@@ -2064,39 +2103,22 @@ void ContainmentInterface::setAppletsOrder(const QList<int> &order)
 
     const QList<int> sanitizedOrder = sanitizeSeparatorOrder(order, m_appletData, containmentPlugins);
 
-    // The layout manager lives in the containment plugin which is not linked
-    // into latte-dock-ng, so invoke it through the meta-object system. The
-    // methods are Q_INVOKABLE (see layoutmanager.h), so this call actually
-    // dispatches instead of silently failing.
-    QMetaObject::invokeMethod(m_layoutManager,
-                              "requestAppletsOrder",
-                              Qt::DirectConnection,
-                              Q_ARG(QList<int>, sanitizedOrder));
+    m_layoutManagerDispatcher.requestAppletsOrder(sanitizedOrder);
 }
 
 void ContainmentInterface::setAppletsInLockedZoom(const QList<int> &applets)
 {
-    QMetaObject::invokeMethod(m_layoutManager,
-                              "requestAppletsInLockedZoom",
-                              Qt::DirectConnection,
-                              Q_ARG(QList<int>, applets));
+    m_layoutManagerDispatcher.requestAppletsInLockedZoom(applets);
 }
 
 void ContainmentInterface::setAppletsDisabledColoring(const QList<int> &applets)
 {
-    QMetaObject::invokeMethod(m_layoutManager,
-                              "requestAppletsDisabledColoring",
-                              Qt::DirectConnection,
-                              Q_ARG(QList<int>, applets));
+    m_layoutManagerDispatcher.requestAppletsDisabledColoring(applets);
 }
 
 void ContainmentInterface::setAppletInScheduledDestruction(const int &id, const bool &enabled)
 {
-    QMetaObject::invokeMethod(m_layoutManager,
-                              "setAppletInScheduledDestruction",
-                              Qt::DirectConnection,
-                              Q_ARG(int, id),
-                              Q_ARG(bool, enabled));
+    m_layoutManagerDispatcher.setAppletInScheduledDestruction(id, enabled);
 }
 
 void ContainmentInterface::updateContainmentConfigProperty(const QString &key, const QVariant &value)
@@ -2270,37 +2292,26 @@ void ContainmentInterface::onAppletAdded(Plasma::Applet *applet)
         return;
     }
 
-    // Check for a pending insertion index set by View::handlePlasmoidDrop.
+    // Check for an insertion request registered by View::handlePlasmoidDrop.
     // The QML Containment.onAppletAdded handler cannot match the Plasma 6
     // signal signature (appletAdded(Plasma::Applet*, const QRectF&) vs the
     // expected (applet, int, int)), so we handle position-aware insertion
     // here in C++ instead.
     if (m_layoutManager) {
-        QVariant pendingIndex = m_layoutManager->property("_latte_pendingInsertionIndex");
+        const int pendingIndex = m_layoutManagerDispatcher.takeAppletInsertionIndex();
 
-        if (pendingIndex.isValid()) {
-            int index = pendingIndex.toInt();
-            m_layoutManager->setProperty("_latte_pendingInsertionIndex", QVariant()); // clear
-
-            // Call addAppletItem via invokeMethod because the LayoutManager
-            // type is defined in the containment plugin, not linked directly.
-            QMetaObject::invokeMethod(m_layoutManager,
-                                      "addAppletItem",
-                                      Q_ARG(QObject*, applet),
-                                      Q_ARG(int, index));
+        if (pendingIndex >= 0) {
+            m_layoutManagerDispatcher.addAppletItem(applet, pendingIndex);
         } else {
             // No drag-drop index. The QML handler never fires in Plasma 6,
             // so we must create the container ourselves here. Place new
             // applets at the end of left-side widgets (before system tray).
-            QList<int> order = m_layoutManager->property("order").value<QList<int >> ();
+            QList<int> order = m_layoutManagerDispatcher.order();
             if (!order.isEmpty() && !order.contains(applet->id())) {
                 const QString pluginId = pluginIdFromMetaData(applet->pluginMetaData());
                 if (!Latte::PluginId::isSeparatorPluginId(pluginId) && pluginId != QLatin1String(Latte::PluginId::kSplitter)) {
                     int defaultIndex = calculateDefaultAppletInsertionIndex(order);
-                    QMetaObject::invokeMethod(m_layoutManager,
-                                              "addAppletItem",
-                                              Q_ARG(QObject*, applet),
-                                              Q_ARG(int, defaultIndex));
+                    m_layoutManagerDispatcher.addAppletItem(applet, defaultIndex);
                 }
             }
         }
@@ -2348,7 +2359,10 @@ void ContainmentInterface::onAppletAdded(Plasma::Applet *applet)
                                << "screen" << (m_view->screen() ? m_view->screen()->name() : QStringLiteral("<none>"))
                                << "id" << currentAppletId
                                << "plugin" << currentPluginId;
-            Q_EMIT appletCreated(currentPluginId);
+            const int beforeAppletId = Latte::PluginId::isSeparatorPluginId(currentPluginId)
+                ? m_boundarySeparatorBeforeAppletId
+                : -1;
+            Q_EMIT appletCreated(currentPluginId, beforeAppletId);
         }
     }
 
@@ -2460,10 +2474,7 @@ void ContainmentInterface::onAppletAdded(Plasma::Applet *applet)
                 if (!destroyed && m_layoutManager) {
                     // Undo: re-show the item that was hidden by the
                     // context menu's early hideAppletItem.
-                    QMetaObject::invokeMethod(m_layoutManager,
-                                              "showAppletItem",
-                                              Qt::DirectConnection,
-                                              Q_ARG(QObject*, applet));
+                    m_layoutManagerDispatcher.showAppletItem(applet);
                 }
             });
 

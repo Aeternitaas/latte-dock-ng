@@ -4,9 +4,11 @@
 */
 
 #include "layoutmanager.h"
+#include "../app/view/layoutmanagerapidispatcher.h"
 
 #include <QQuickItem>
 #include <QQmlPropertyMap>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTest>
 
@@ -32,27 +34,134 @@ class RestoreRoot : public QQuickItem
         return QVariant::fromValue(item);
     }
 
+    //! Mirrors Containment.onAppletAdded in main.qml: consume the one-shot
+    //! insertion request and add the applet at that index when one is set.
+    int addAppletAtRequestedIndex(Latte::Containment::LayoutManager &manager, QObject *applet)
+    {
+        const int indexPath = manager.takeAppletInsertionIndex();
+
+        if (indexPath >= 0) {
+            manager.addAppletItem(applet, indexPath);
+        } else {
+            manager.addAppletItem(applet, manager.defaultInsertionIndex());
+        }
+
+        return indexPath;
+    }
+
     int appletItemCreationCount() const
     {
         return m_appletItemCreationCount;
     }
 
-    Q_INVOKABLE QVariant createJustifySplitter()
+    Q_INVOKABLE void initAppletContainer(QVariant container, QVariant applet)
     {
-        ++m_justifySplitterCreationCount;
-        auto *item = new QQuickItem(this);
-        item->setProperty("isInternalViewSplitter", true);
-        return QVariant::fromValue(item);
-    }
-
-    int justifySplitterCreationCount() const
-    {
-        return m_justifySplitterCreationCount;
+        if (auto *item = container.value<QQuickItem *>()) {
+            item->setProperty("applet", applet);
+        }
     }
 
 private:
     int m_appletItemCreationCount{0};
-    int m_justifySplitterCreationCount{0};
+};
+
+class MissingInitRoot : public QQuickItem
+{
+    Q_OBJECT
+public:
+    Q_INVOKABLE QVariant createAppletItem(QVariant applet)
+    {
+        auto *item = new QQuickItem(this);
+        item->setProperty("backendAppletRef", applet);
+        return QVariant::fromValue(item);
+    }
+};
+
+class MissingCreateRoot : public QQuickItem
+{
+    Q_OBJECT
+public:
+    Q_INVOKABLE void initAppletContainer(QVariant, QVariant)
+    {
+    }
+};
+
+// Simulates a containment plugin loaded from an installation root that predates
+// LayoutManagerApi but still implements the established QObject contract.
+class LegacyLayoutManagerObject : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(QQuickItem *rootItem READ rootItem WRITE setRootItem)
+    Q_PROPERTY(QQuickItem *dndSpacerItem READ dndSpacerItem WRITE setDndSpacerItem)
+    Q_PROPERTY(QList<int> order READ order WRITE setOrder)
+    Q_PROPERTY(QList<int> lockedZoomApplets READ lockedZoomApplets WRITE setLockedZoomApplets)
+    Q_PROPERTY(QList<int> userBlocksColorizingApplets READ userBlocksColorizingApplets WRITE setUserBlocksColorizingApplets)
+
+public:
+    QQuickItem *rootItem() const { return m_rootItem; }
+    void setRootItem(QQuickItem *item) { m_rootItem = item; }
+    QQuickItem *dndSpacerItem() const { return m_dndSpacerItem; }
+    void setDndSpacerItem(QQuickItem *item) { m_dndSpacerItem = item; }
+    QList<int> order() const { return m_order; }
+    void setOrder(const QList<int> &value) { m_order = value; }
+    QList<int> lockedZoomApplets() const { return m_lockedZoomApplets; }
+    void setLockedZoomApplets(const QList<int> &value) { m_lockedZoomApplets = value; }
+    QList<int> userBlocksColorizingApplets() const { return m_userBlocksColorizingApplets; }
+    void setUserBlocksColorizingApplets(const QList<int> &value) { m_userBlocksColorizingApplets = value; }
+
+    Q_INVOKABLE void setOption(int appletId, const QString &property, const QVariant &value)
+    {
+        lastAppletId = appletId;
+        lastOption = property;
+        lastOptionValue = value;
+        if (property == QStringLiteral("userBlocksColorizing")) {
+            m_userBlocksColorizingApplets = value.toBool() ? QList<int>{appletId} : QList<int>{};
+        }
+    }
+    Q_INVOKABLE void addAppletItem(QObject *applet, int index) { lastApplet = applet; lastIndex = index; ++addCount; }
+    Q_INVOKABLE void removeAppletItem(QObject *) { ++removeCount; }
+    Q_INVOKABLE void hideAppletItem(QObject *) { ++hideCount; }
+    Q_INVOKABLE void showAppletItem(QObject *) { ++showCount; }
+    Q_INVOKABLE void insertAtCoordinates(QQuickItem *item, int x, int y) { lastItem = item; lastX = x; lastY = y; }
+    Q_INVOKABLE int dndSpacerIndex() { return 4; }
+    Q_INVOKABLE void requestAppletsOrder(const QList<int> &value) { m_order = value; }
+    Q_INVOKABLE void requestAppletsInLockedZoom(const QList<int> &value) { m_lockedZoomApplets = value; }
+    Q_INVOKABLE void requestAppletsDisabledColoring(const QList<int> &value) { m_userBlocksColorizingApplets = value; }
+    Q_INVOKABLE void setAppletInScheduledDestruction(int id, bool enabled) { lastScheduledId = id; lastScheduled = enabled; }
+
+    //! The pre-S4 contract kept the one-shot insertion protocol in dynamic
+    //! properties, so the legacy dispatcher path must still reach it.
+    int pendingInsertionIndex() const
+    {
+        const QVariant pendingIndex = property("_latte_pendingInsertionIndex");
+        return pendingIndex.isValid() ? pendingIndex.toInt() : -1;
+    }
+    bool skipSpacerReorderRequested() const
+    {
+        return property("_latte_skipSpacerReorder").toBool();
+    }
+
+    int addCount{0};
+    int removeCount{0};
+    int hideCount{0};
+    int showCount{0};
+    int lastIndex{-1};
+    int lastX{-1};
+    int lastY{-1};
+    int lastAppletId{-1};
+    int lastScheduledId{-1};
+    bool lastScheduled{false};
+    QString lastOption;
+    QVariant lastOptionValue;
+    QObject *lastApplet{nullptr};
+    QQuickItem *lastItem{nullptr};
+
+private:
+    QQuickItem *m_rootItem{nullptr};
+    QQuickItem *m_dndSpacerItem{nullptr};
+    QList<int> m_order;
+    QList<int> m_lockedZoomApplets;
+    QList<int> m_userBlocksColorizingApplets;
 };
 
 class ContainmentLayoutUnitTest : public QObject
@@ -73,7 +182,302 @@ private Q_SLOTS:
     void resolveAppletQuickItemFindsQuickItemThroughPropertyChain();
     void restoresAndSavesLegacyJustifyFromPersistedMap();
     void joinsLegacyJustifyLayoutsThroughProductionEntryPoint();
+    void dndSpacerIndexUsesMainLayoutAndSkipsParabolicSpacers();
+    void insertAtCoordinatesUsesMainLayoutForJustify();
+    void requestAppletsOrderMaintainsSideAppletOrderInJustify();
+    void addAppletItemByIndexUsesMainLayoutInJustify();
+    void warnsWhenContainmentRootMethodsAreMissing();
+    void warnsOncePerMissingLayoutChildRole();
+    void edgeSpacerNeedsNoBackendAppletRole();
+    void restoreWarnsWhenCreateAppletItemIsMissing();
+    void warnsOnceForMissingInitMethodDuringRepair();
+    void rootDestructionClearsMethodsAndReplacementRebinds();
+    void managerDestructionDisconnectsChildRootCallback();
+    void dispatcherUsesLegacyQObjectContractAndTracksLifetime();
+    void dispatcherPrefersTypedInterface();
+    void insertionRequestIsConsumedOnce();
+    void droppedInsertionRequestDoesNotDisplaceNextApplet();
+    void skipSpacerReorderRequestIsConsumedByOneSave();
 };
+
+void
+ContainmentLayoutUnitTest::dispatcherUsesLegacyQObjectContractAndTracksLifetime()
+{
+    Latte::ViewPart::LayoutManagerApiDispatcher dispatcher;
+    auto *legacy = new LegacyLayoutManagerObject;
+    QQuickItem root;
+    QQuickItem spacer;
+    legacy->setRootItem(&root);
+    legacy->setDndSpacerItem(&spacer);
+    legacy->setOrder({31, 37});
+    legacy->setLockedZoomApplets({31});
+    legacy->setUserBlocksColorizingApplets({37});
+
+    QVERIFY(!qobject_cast<Latte::Containment::LayoutManagerApi *>(legacy));
+    dispatcher.setObject(legacy);
+    QCOMPARE(dispatcher.rootItem(), &root);
+    QCOMPARE(dispatcher.dndSpacer(), &spacer);
+    QCOMPARE(dispatcher.order(), QList<int>({31, 37}));
+    QCOMPARE(dispatcher.lockedZoomApplets(), QList<int>({31}));
+    QCOMPARE(dispatcher.userBlocksColorizingApplets(), QList<int>({37}));
+
+    QObject applet;
+    dispatcher.addAppletItem(&applet, 2);
+    QCOMPARE(legacy->addCount, 1);
+    QCOMPARE(legacy->lastApplet, &applet);
+    QCOMPARE(legacy->lastIndex, 2);
+    dispatcher.setOption(37, QStringLiteral("userBlocksColorizing"), false);
+    QCOMPARE(legacy->lastAppletId, 37);
+    QCOMPARE(legacy->userBlocksColorizingApplets(), QList<int>{});
+    dispatcher.requestAppletsOrder({41, 43});
+    QCOMPARE(dispatcher.order(), QList<int>({41, 43}));
+    dispatcher.requestAppletsInLockedZoom({41});
+    QCOMPARE(dispatcher.lockedZoomApplets(), QList<int>({41}));
+    dispatcher.requestAppletsDisabledColoring({43});
+    QCOMPARE(dispatcher.userBlocksColorizingApplets(), QList<int>({43}));
+    dispatcher.insertAtCoordinates(&spacer, 8, 13);
+    QCOMPARE(legacy->lastItem, &spacer);
+    QCOMPARE(legacy->lastX, 8);
+    QCOMPARE(legacy->lastY, 13);
+    QCOMPARE(dispatcher.dndSpacerIndex(), 4);
+    dispatcher.hideAppletItem(&applet);
+    dispatcher.showAppletItem(&applet);
+    dispatcher.removeAppletItem(&applet);
+    dispatcher.setAppletInScheduledDestruction(43, true);
+    QCOMPARE(legacy->hideCount, 1);
+    QCOMPARE(legacy->showCount, 1);
+    QCOMPARE(legacy->removeCount, 1);
+    QCOMPARE(legacy->lastScheduledId, 43);
+    QVERIFY(legacy->lastScheduled);
+
+    // The one-shot protocol still reaches a plugin that only publishes the
+    // older dynamic properties, and a dropped request leaves nothing behind.
+    dispatcher.expectAppletInsertionAt(6);
+    QCOMPARE(legacy->pendingInsertionIndex(), 6);
+    QCOMPARE(dispatcher.takeAppletInsertionIndex(), 6);
+    QCOMPARE(dispatcher.takeAppletInsertionIndex(), -1);
+    dispatcher.expectAppletInsertionAt(2);
+    dispatcher.expectAppletInsertionAt(-1);
+    QCOMPARE(dispatcher.takeAppletInsertionIndex(), -1);
+    QVERIFY(!legacy->skipSpacerReorderRequested());
+    dispatcher.expectSkipSpacerReorderOnce();
+    QVERIFY(legacy->skipSpacerReorderRequested());
+
+    delete legacy;
+    QVERIFY(!dispatcher.object());
+    QVERIFY(!dispatcher.rootItem());
+    QVERIFY(dispatcher.order().isEmpty());
+    LegacyLayoutManagerObject replacementObject;
+    dispatcher.setObject(&replacementObject);
+    QCOMPARE(dispatcher.order(), QList<int>{});
+    replacementObject.setOrder({53});
+    QCOMPARE(dispatcher.order(), QList<int>{53});
+}
+
+void
+ContainmentLayoutUnitTest::dispatcherPrefersTypedInterface()
+{
+    Latte::Containment::LayoutManager manager;
+    Latte::ViewPart::LayoutManagerApiDispatcher dispatcher;
+    dispatcher.setObject(&manager);
+
+    QVERIFY(qobject_cast<Latte::Containment::LayoutManagerApi *>(&manager));
+    dispatcher.requestAppletsOrder({59, 61});
+    QCOMPARE(dispatcher.order(), QList<int>({59, 61}));
+}
+
+//! A layout child that stops declaring a role the manager reads by name used to
+//! make every read return false without a word. The manager now reports it once
+//! per role, which is the cheap alternative to a typed layout-item base class.
+void ContainmentLayoutUnitTest::warnsOncePerMissingLayoutChildRole()
+{
+    TestConfig configuration;
+    configuration.insert(QStringLiteral("alignment"), QStringLiteral("Justify"));
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&configuration)));
+
+    RestoreRoot root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+
+    // A plain QQuickItem declares none of the three roles.
+    QQuickItem rolelessChild;
+    rolelessChild.setParentItem(&main);
+
+    Latte::Containment::LayoutManager manager;
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing the role isInternalViewSplitter.*")));
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing the role isParabolicEdgeSpacer.*")));
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing the role backendAppletRef.*")));
+    manager.save();
+
+    // Declaring the roles keeps the log clean: no further warning is expected.
+    QQuickItem declaredChild;
+    declaredChild.setProperty("isInternalViewSplitter", false);
+    declaredChild.setProperty("isParabolicEdgeSpacer", false);
+    declaredChild.setParentItem(&main);
+    manager.save();
+}
+
+//! A parabolic edge spacer is a gap, not an applet container: it never declares
+//! backendAppletRef, and demanding one would report a fault on every healthy
+//! layout. Only the two markers are required of it.
+void ContainmentLayoutUnitTest::edgeSpacerNeedsNoBackendAppletRole()
+{
+    TestConfig configuration;
+    configuration.insert(QStringLiteral("alignment"), QStringLiteral("Justify"));
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&configuration)));
+
+    RestoreRoot root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+
+    QQuickItem edgeSpacer;
+    edgeSpacer.setProperty("isInternalViewSplitter", false);
+    edgeSpacer.setProperty("isParabolicEdgeSpacer", true);
+    edgeSpacer.setParentItem(&main);
+
+    Latte::Containment::LayoutManager manager;
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+
+    // backendAppletRef must not be demanded of a spacer. A missing isInternalViewSplitter
+    // or isParabolicEdgeSpacer warning would still be legitimate on this fixture
+    // (plain QQuickItem items elsewhere), so assert on the role name instead: QtTest
+    // fails the test when an unexpected warning mentioning backendAppletRef arrives.
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing the role isInternalViewSplitter.*")));
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing the role isParabolicEdgeSpacer.*")));
+    manager.save();
+}
+
+void
+ContainmentLayoutUnitTest::warnsWhenContainmentRootMethodsAreMissing()
+{
+    QQuickItem root;
+    Latte::Containment::LayoutManager manager;
+
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing required function createAppletItem\\(QVariant\\).*")));
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing required function initAppletContainer\\(QVariant,QVariant\\).*")));
+    manager.setRootItem(&root);
+}
+
+void
+ContainmentLayoutUnitTest::warnsOnceForMissingInitMethodDuringRepair()
+{
+    TestConfig config;
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&config)));
+
+    QQuickItem applet;
+    applet.setProperty("id", 47);
+    applet.setProperty("_plasma_graphicObject", QVariant::fromValue(static_cast<QObject *>(&applet)));
+    plasmoid.setProperty("applets", QVariant::fromValue(QList<QObject *>{ &applet }));
+
+    MissingInitRoot root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    Latte::Containment::LayoutManager manager;
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing required function initAppletContainer\\(QVariant,QVariant\\).*")));
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+    QVERIFY(manager.repairAppletContainers());
+    QVERIFY(manager.repairAppletContainers());
+}
+
+void
+ContainmentLayoutUnitTest::restoreWarnsWhenCreateAppletItemIsMissing()
+{
+    TestConfig config;
+    config.insert(QStringLiteral("appletOrder"), QStringLiteral("44"));
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&config)));
+
+    QQuickItem applet;
+    applet.setProperty("id", 44);
+    applet.setProperty("_plasma_graphicObject", QVariant::fromValue(static_cast<QObject *>(&applet)));
+    plasmoid.setProperty("applets", QVariant::fromValue(QList<QObject *>{ &applet }));
+
+    MissingCreateRoot root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    Latte::Containment::LayoutManager manager;
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral(".*missing required function createAppletItem\\(QVariant\\).*")));
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+
+    manager.restore();
+
+    QVERIFY(!manager.hasRestoredApplets());
+    QCOMPARE(config.value(QStringLiteral("appletOrder")).toString(), QStringLiteral("44"));
+    QVERIFY(main.childItems().isEmpty());
+}
+
+void
+ContainmentLayoutUnitTest::rootDestructionClearsMethodsAndReplacementRebinds()
+{
+    TestConfig config;
+    config.insert(QStringLiteral("appletOrder"), QStringLiteral("44"));
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&config)));
+
+    QQuickItem applet;
+    applet.setProperty("id", 44);
+    applet.setProperty("_plasma_graphicObject", QVariant::fromValue(static_cast<QObject *>(&applet)));
+    plasmoid.setProperty("applets", QVariant::fromValue(QList<QObject *>{ &applet }));
+
+    auto *root = new RestoreRoot;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    Latte::Containment::LayoutManager manager;
+    manager.setRootItem(root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+    QSignalSpy rootChangedSpy(&manager, &Latte::Containment::LayoutManager::rootItemChanged);
+    delete root;
+    QVERIFY(manager.rootItem() == nullptr);
+    QCOMPARE(rootChangedSpy.count(), 1);
+
+    RestoreRoot replacement;
+    manager.setRootItem(&replacement);
+    manager.restore();
+    QCOMPARE(replacement.appletItemCreationCount(), 1);
+}
+
+void
+ContainmentLayoutUnitTest::managerDestructionDisconnectsChildRootCallback()
+{
+    auto *manager = new Latte::Containment::LayoutManager;
+    auto *root = new RestoreRoot;
+    root->setParent(manager);
+    manager->setRootItem(root);
+    QSignalSpy destroyedSpy(root, &QObject::destroyed);
+
+    delete manager;
+
+    QCOMPARE(destroyedSpy.count(), 1);
+}
 
 void
 ContainmentLayoutUnitTest::independentCopyWaitsForLateApplet_data()
@@ -318,7 +722,7 @@ void ContainmentLayoutUnitTest::restoresAndSavesLegacyJustifyFromPersistedMap()
     // deliberately does not claim to cover the Plasma-to-KConfig disk reader.
     TestConfig configuration;
     configuration.insert(QStringLiteral("alignment"), QStringLiteral("Justify"));
-    configuration.insert(QStringLiteral("appletOrder"), QStringLiteral("44;46;45"));
+    configuration.insert(QStringLiteral("appletOrder"), QStringLiteral("44;-1;46;-1;45"));
     configuration.insert(QStringLiteral("splitterPosition"), 2);
     configuration.insert(QStringLiteral("splitterPosition2"), 4);
 
@@ -349,7 +753,6 @@ void ContainmentLayoutUnitTest::restoresAndSavesLegacyJustifyFromPersistedMap()
 
     manager.restore();
 
-    QCOMPARE(root.justifySplitterCreationCount(), 0);
     QVERIFY(start.childItems().isEmpty());
     QCOMPARE(main.childItems().count(), 3);
     QVERIFY(end.childItems().isEmpty());
@@ -357,6 +760,7 @@ void ContainmentLayoutUnitTest::restoresAndSavesLegacyJustifyFromPersistedMap()
     QCOMPARE(manager.order(), (QList<int>{ 44, 46, 45 }));
     QCOMPARE(manager.splitterPosition(), 2);
     QCOMPARE(manager.splitterPosition2(), 4);
+    QCOMPARE(configuration.value(QStringLiteral("appletOrder")).toString(), QStringLiteral("44;46;45"));
 
     QList<int> restoredAppletIds;
     for (QQuickItem *item : main.childItems()) {
@@ -398,13 +802,300 @@ void ContainmentLayoutUnitTest::joinsLegacyJustifyLayoutsThroughProductionEntryP
     manager.setPlasmoid(&plasmoid);
     manager.addJustifySplittersInMainLayout();
 
-    QCOMPARE(root.justifySplitterCreationCount(), 0);
     QVERIFY(start.childItems().isEmpty());
     QVERIFY(end.childItems().isEmpty());
     QCOMPARE(main.childItems(), (QList<QQuickItem *>{ &startApplet, &mainApplet, &endApplet }));
 }
 
+void ContainmentLayoutUnitTest::dndSpacerIndexUsesMainLayoutAndSkipsParabolicSpacers()
+{
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    QQuickItem startApplet;
+    QQuickItem firstApplet;
+    QQuickItem parabolicSpacer;
+    QQuickItem spacer;
+    QQuickItem secondApplet;
+    startApplet.setParentItem(&start);
+    firstApplet.setParentItem(&main);
+    parabolicSpacer.setParentItem(&main);
+    spacer.setParentItem(&main);
+    secondApplet.setParentItem(&main);
+    parabolicSpacer.setProperty("isParabolicEdgeSpacer", true);
 
+    Latte::Containment::LayoutManager manager;
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setDndSpacer(&spacer);
+
+    QCOMPARE(manager.dndSpacerIndex(), 1);
+
+    spacer.setParentItem(&start);
+    QCOMPARE(manager.dndSpacerIndex(), -1);
+}
+
+void ContainmentLayoutUnitTest::insertAtCoordinatesUsesMainLayoutForJustify()
+{
+    TestConfig configuration;
+    configuration.insert(QStringLiteral("alignment"), QStringLiteral("Justify"));
+    QObject plasmoid;
+    plasmoid.setProperty("formFactor", 0);
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&configuration)));
+
+    QQuickItem root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    root.setWidth(300);
+    root.setHeight(50);
+    start.setParentItem(&root);
+    start.setWidth(100);
+    start.setHeight(50);
+    main.setParentItem(&root);
+    main.setX(100);
+    main.setWidth(100);
+    main.setHeight(50);
+    end.setParentItem(&root);
+    end.setX(200);
+    end.setWidth(100);
+    end.setHeight(50);
+
+    QQuickItem existingApplet;
+    existingApplet.setWidth(30);
+    existingApplet.setHeight(50);
+    existingApplet.setParentItem(&main);
+    QQuickItem draggedItem;
+
+    Latte::Containment::LayoutManager manager;
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+
+    manager.insertAtCoordinates(&draggedItem, 105, 25);
+
+    QCOMPARE(main.childItems(), (QList<QQuickItem *>{ &draggedItem, &existingApplet }));
+    QVERIFY(start.childItems().isEmpty());
+    QVERIFY(end.childItems().isEmpty());
+
+    QQuickItem fallbackHeadItem;
+    manager.insertAtCoordinates(&fallbackHeadItem, 205, 25);
+
+    QCOMPARE(main.childItems().last(), &fallbackHeadItem);
+    QVERIFY(end.childItems().isEmpty());
+}
+
+void ContainmentLayoutUnitTest::requestAppletsOrderMaintainsSideAppletOrderInJustify()
+{
+    TestConfig configuration;
+    configuration.insert(QStringLiteral("alignment"), QStringLiteral("Justify"));
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&configuration)));
+
+    QObject firstBackend;
+    firstBackend.setProperty("id", 1);
+    QObject mainBackend;
+    mainBackend.setProperty("id", 2);
+    QObject lastBackend;
+    lastBackend.setProperty("id", 3);
+
+    QQuickItem root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    QQuickItem first;
+    first.setProperty("backendAppletRef", QVariant::fromValue(static_cast<QObject *>(&firstBackend)));
+    first.setParentItem(&start);
+    QQuickItem middle;
+    middle.setProperty("backendAppletRef", QVariant::fromValue(static_cast<QObject *>(&mainBackend)));
+    middle.setParentItem(&main);
+    QQuickItem last;
+    last.setProperty("backendAppletRef", QVariant::fromValue(static_cast<QObject *>(&lastBackend)));
+    last.setParentItem(&end);
+
+    Latte::Containment::LayoutManager manager;
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+
+    manager.requestAppletsOrder(QList<int>{ 3, 1, 2 });
+
+    QVERIFY(start.childItems().isEmpty());
+    QVERIFY(end.childItems().isEmpty());
+    QCOMPARE(main.childItems(), (QList<QQuickItem *>{ &last, &first, &middle }));
+    QCOMPARE(configuration.value(QStringLiteral("appletOrder")).toString(), QStringLiteral("3;1;2"));
+}
+
+void ContainmentLayoutUnitTest::addAppletItemByIndexUsesMainLayoutInJustify()
+{
+    TestConfig configuration;
+    configuration.insert(QStringLiteral("alignment"), QStringLiteral("Justify"));
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&configuration)));
+
+    QObject firstBackend;
+    firstBackend.setProperty("id", 10);
+    QObject lastBackend;
+    lastBackend.setProperty("id", 20);
+    QObject newBackend;
+    newBackend.setProperty("id", 15);
+
+    RestoreRoot root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    QQuickItem first;
+    first.setProperty("backendAppletRef", QVariant::fromValue(static_cast<QObject *>(&firstBackend)));
+    first.setParentItem(&main);
+    QQuickItem last;
+    last.setProperty("backendAppletRef", QVariant::fromValue(static_cast<QObject *>(&lastBackend)));
+    last.setParentItem(&main);
+
+    Latte::Containment::LayoutManager manager;
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+    manager.requestAppletsOrder(QList<int>{ 10, 20 });
+
+    manager.addAppletItem(&newBackend, 1);
+
+    QCOMPARE(main.childItems().count(), 3);
+    QCOMPARE(main.childItems().at(0), &first);
+    QCOMPARE(main.childItems().at(2), &last);
+    QCOMPARE(main.childItems().at(1)->property("backendAppletRef").value<QObject *>(), static_cast<QObject *>(&newBackend));
+    QCOMPARE(configuration.value(QStringLiteral("appletOrder")).toString(), QStringLiteral("10;15;20"));
+}
+
+
+
+void ContainmentLayoutUnitTest::insertionRequestIsConsumedOnce()
+{
+    Latte::Containment::LayoutManager manager;
+    Latte::ViewPart::LayoutManagerApiDispatcher dispatcher;
+    dispatcher.setObject(&manager);
+
+    QCOMPARE(dispatcher.takeAppletInsertionIndex(), -1);
+
+    dispatcher.expectAppletInsertionAt(3);
+    QCOMPARE(dispatcher.takeAppletInsertionIndex(), 3);
+    QCOMPARE(dispatcher.takeAppletInsertionIndex(), -1);
+
+    // A second request replaces the first one instead of queueing behind it:
+    // the protocol describes the next creation only.
+    dispatcher.expectAppletInsertionAt(1);
+    dispatcher.expectAppletInsertionAt(5);
+    QCOMPARE(dispatcher.takeAppletInsertionIndex(), 5);
+    QCOMPARE(dispatcher.takeAppletInsertionIndex(), -1);
+}
+
+void ContainmentLayoutUnitTest::droppedInsertionRequestDoesNotDisplaceNextApplet()
+{
+    TestConfig configuration;
+    configuration.insert(QStringLiteral("alignment"), QStringLiteral("Justify"));
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&configuration)));
+
+    QObject firstBackend;
+    firstBackend.setProperty("id", 10);
+    QObject secondBackend;
+    secondBackend.setProperty("id", 20);
+    QObject lateBackend;
+    lateBackend.setProperty("id", 30);
+    QObject failedDropBackend;
+    failedDropBackend.setProperty("id", 40);
+
+    RestoreRoot root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    QQuickItem first;
+    first.setProperty("backendAppletRef", QVariant::fromValue(static_cast<QObject *>(&firstBackend)));
+    first.setParentItem(&main);
+    QQuickItem second;
+    second.setProperty("backendAppletRef", QVariant::fromValue(static_cast<QObject *>(&secondBackend)));
+    second.setParentItem(&main);
+
+    Latte::Containment::LayoutManager manager;
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+    manager.requestAppletsOrder(QList<int>{ 10, 20 });
+
+    // A drop registers index 1 but reports no created applet, so the requester
+    // drops the request. The next applet must not inherit that stale slot.
+    manager.expectAppletInsertionAt(1);
+    manager.expectAppletInsertionAt(-1);
+    QCOMPARE(manager.takeAppletInsertionIndex(), -1);
+
+    QCOMPARE(root.addAppletAtRequestedIndex(manager, &failedDropBackend), -1);
+    QCOMPARE(main.childItems().count(), 3);
+    QCOMPARE(main.childItems().last()->property("backendAppletRef").value<QObject *>(), static_cast<QObject *>(&failedDropBackend));
+
+    // A registered request still wins over the default insertion index.
+    manager.expectAppletInsertionAt(1);
+    QCOMPARE(root.addAppletAtRequestedIndex(manager, &lateBackend), 1);
+    QCOMPARE(main.childItems().at(1)->property("backendAppletRef").value<QObject *>(), static_cast<QObject *>(&lateBackend));
+    QCOMPARE(configuration.value(QStringLiteral("appletOrder")).toString(), QStringLiteral("10;30;20;40"));
+}
+
+void ContainmentLayoutUnitTest::skipSpacerReorderRequestIsConsumedByOneSave()
+{
+    TestConfig configuration;
+    configuration.insert(QStringLiteral("alignment"), QStringLiteral("Justify"));
+    QObject plasmoid;
+    plasmoid.setProperty("configuration", QVariant::fromValue(static_cast<QObject *>(&configuration)));
+
+    RestoreRoot root;
+    QQuickItem start;
+    QQuickItem main;
+    QQuickItem end;
+    // reorderParabolicSpacers() moves these to the layout tail and head, so
+    // their positions show whether a save() ran it.
+    QQuickItem frontSpacer;
+    QQuickItem rearSpacer;
+    frontSpacer.setProperty("isParabolicEdgeSpacer", true);
+    rearSpacer.setProperty("isParabolicEdgeSpacer", true);
+    frontSpacer.setParentItem(&main);
+    rearSpacer.setParentItem(&main);
+    QQuickItem applet;
+    applet.setParentItem(&main);
+    main.setProperty("startParabolicSpacer", QVariant::fromValue(static_cast<QQuickItem *>(&frontSpacer)));
+    main.setProperty("endParabolicSpacer", QVariant::fromValue(static_cast<QQuickItem *>(&rearSpacer)));
+
+    Latte::Containment::LayoutManager manager;
+    manager.setRootItem(&root);
+    manager.setStartLayout(&start);
+    manager.setMainLayout(&main);
+    manager.setEndLayout(&end);
+    manager.setPlasmoid(&plasmoid);
+
+    // Without a request the spacers are reordered by the first save().
+    manager.save();
+    QCOMPARE(main.childItems(), (QList<QQuickItem *>{ &frontSpacer, &applet, &rearSpacer }));
+    QCOMPARE(main.childItems().last(), &rearSpacer);
+
+    frontSpacer.setParentItem(&main);
+    rearSpacer.setParentItem(&main);
+    QQuickItem secondApplet;
+    secondApplet.setParentItem(&main);
+
+    // The request suppresses exactly one save(); the next save() reorders again.
+    manager.expectSkipSpacerReorderOnce();
+    manager.save();
+    QCOMPARE(main.childItems().last(), &secondApplet);
+    manager.save();
+    QCOMPARE(main.childItems().first(), &frontSpacer);
+    QCOMPARE(main.childItems().last(), &rearSpacer);
+}
 
 QTEST_MAIN(ContainmentLayoutUnitTest)
 

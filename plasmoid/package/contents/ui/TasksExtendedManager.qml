@@ -51,9 +51,103 @@ Item {
     property int launchersToBeRemovedCount: 0 //is used to update instantly relevant bindings
 
     signal waitingLauncherRemoved(string launch);
-
-
     /////////// FUNCTIONALITY ////////////////////
+
+    // LibTaskManager can briefly insert a window/startup delegate before the
+    // matching pinned launcher delegate finishes removal (and does the reverse
+    // on close). Keep only the incoming row out of the layout during that
+    // handoff; the outgoing delegate remains the authoritative visual until its
+    // own removal animation completes. Restrict this to adjacent, same-identity
+    // launcher/task rows so grouped or multiple-window tasks keep their normal
+    // independent geometry and animation.
+    // The live delegate is authoritative during LibTaskManager's transition:
+    // serialized launcherList membership can temporarily fail to match the
+    // URL of a still-visible pinned row, so match the actual opposite-role
+    // delegate and its identity instead of that transient list snapshot.
+    function findAdjacentTaskRowReplacement(incoming, candidates, includeLiveRows) {
+        if (!incoming || !candidates) {
+            return null;
+        }
+
+        for (var i = 0; i < candidates.length; ++i) {
+            var candidate = candidates[i];
+            if (!candidate || candidate === incoming || candidate.objectName !== "TaskItem") {
+                continue;
+            }
+
+            if (isAdjacentTaskRowReplacement(incoming, candidate, includeLiveRows)) {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    function isAdjacentTaskRowReplacement(incoming, outgoing, includeLiveRows) {
+        if (!incoming || !outgoing || incoming === outgoing
+                || incoming.isGroupParent || outgoing.isGroupParent
+                || incoming.isSeparator || outgoing.isSeparator
+                || incoming.windowsCount > 1 || outgoing.windowsCount > 1
+                || incoming.itemIndex < 0 || (!includeLiveRows && outgoing.itemIndex >= 0)) {
+            return false;
+        }
+
+        var sameLauncher = (incoming.launcherUrl !== ""
+                            && incoming.launcherUrl === outgoing.launcherUrl)
+                || (incoming.launcherUrlWithIcon !== ""
+                    && incoming.launcherUrlWithIcon === outgoing.launcherUrlWithIcon);
+        if (!sameLauncher) {
+            return false;
+        }
+
+        var incomingIsTask = incoming.isWindow || incoming.isStartup;
+        var outgoingIsTask = outgoing.isWindow || outgoing.isStartup;
+        var isLauncherToTask = outgoing.isLauncher && incomingIsTask;
+        var isTaskToLauncher = incoming.isLauncher && outgoingIsTask;
+        if (!isLauncherToTask && !isTaskToLauncher) {
+            return false;
+        }
+
+        var outgoingIndex = outgoing.itemIndex >= 0 ? outgoing.itemIndex : outgoing.previousModelIndex;
+        return outgoingIndex >= 0 && Math.abs(incoming.itemIndex - outgoingIndex) <= 1;
+    }
+
+    function holdTaskRowForReplacement(incoming, outgoing) {
+        if (!isAdjacentTaskRowReplacement(incoming, outgoing)
+                || outgoing.taskRowReplacementSuccessor || incoming.waitingForTaskRowReplacement) {
+            return false;
+        }
+
+        incoming.pendingTaskRowReplacementOutgoing = outgoing;
+        incoming.waitingForTaskRowReplacement = true;
+        outgoing.taskRowReplacementSuccessor = incoming;
+        incoming.parabolicItem.zoomLength = 0;
+        incoming.parabolicItem.zoomThickness = 0;
+        incoming.parabolicItem.opacity = 0;
+        return true;
+    }
+
+    function releaseTaskRowReplacement(incoming, outgoing, removalAnimationFinished) {
+        if (!incoming || !outgoing || incoming.pendingTaskRowReplacementOutgoing !== outgoing) {
+            return false;
+        }
+
+        incoming.pendingTaskRowReplacementOutgoing = null;
+        incoming.waitingForTaskRowReplacement = false;
+        if (outgoing.taskRowReplacementSuccessor === incoming) {
+            outgoing.taskRowReplacementSuccessor = null;
+        }
+
+        // The removal animation has already passed the RemovalScheduler's
+        // zero-interval defer, so its final frame is safe for an atomic slot
+        // handoff. Other callers (index cancellation/destruction) still defer.
+        if (removalAnimationFinished) {
+            incoming.resumeTaskRowReplacementAnimation(true);
+        } else {
+            incoming.scheduleTaskRowReplacementAnimation();
+        }
+        return true;
+    }
 
 
     /// WAITING LAUNCHERS

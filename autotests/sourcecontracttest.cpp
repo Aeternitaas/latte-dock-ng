@@ -424,6 +424,8 @@ private Q_SLOTS:
     void pointerWindowTrackerRemovesDestroyedWindows();
     void visibilityManagerBlockerWrappersDelegateTransitions();
 
+    void insertionRequestIsATypedOneShotProtocol();
+
     // Meta hold on Wayland
     void metaHoldPreferenceIsAnOptInThatTheDialogDoesNotForce();
     void shortcutBadgeShadowEffectsAnchorToTheirLoader();
@@ -748,7 +750,7 @@ void SourceContractTest::allScreensCloneAppletSyncContracts()
     const QString interfaceCpp = QString::fromUtf8(interfaceSource.readAll());
     QVERIFY(interfaceCpp.contains(QStringLiteral("suppressNextAppletCreatedSignal();\n    Plasma::Applet *createdApplet = m_view->containment()->createApplet(pluginId);")));
     QVERIFY(!interfaceCpp.contains(QStringLiteral("Latte::Layouts::Importer::standardPaths();\n    QString pluginpath;")));
-    QVERIFY(interfaceCpp.contains(QStringLiteral("Q_EMIT appletCreated(currentPluginId);")));
+    QVERIFY(interfaceCpp.contains(QStringLiteral("Q_EMIT appletCreated(currentPluginId, beforeAppletId);")));
     // Since ed0afd054 a missing cached AppletQuickItem falls back to
     // itemForApplet() resolution instead of bailing out with nullptr.
     QVERIFY(interfaceCpp.contains(QStringLiteral("if (!ai) {\n                ai = PlasmaQuick::AppletQuickItem::itemForApplet(m_appletData[id].applet);\n            }")));
@@ -778,7 +780,13 @@ void SourceContractTest::allScreensCloneAppletSyncContracts()
     QVERIFY(clonedViewSource.contains(QStringLiteral("structuralSyncReady")));
     QVERIFY(clonedViewSource.contains(QStringLiteral("bool ClonedView::refreshAppletIdsHash()")));
     QVERIFY(clonedViewSource.contains(QStringLiteral("if (refreshAppletIdsHash()) {\n            onOriginalAppletsOrderChanged();\n        }")));
-    QVERIFY(clonedViewSource.contains(QStringLiteral("extendedInterface()->addApplet(pluginId);\n        m_syncingFromOriginal = false;\n        onOriginalAppletsOrderChanged();")));
+    // Both docks use the boundary insertion path, which repairs the order
+    // when Plasma emits appletAdded before the visual container is ready.
+    QVERIFY(interfaceCpp.contains(QStringLiteral("insertBoundarySeparatorBeforeApplet(beforeAppletId, false);")));
+    QVERIFY(interfaceCpp.contains(QStringLiteral("const QScopedValueRollback anchor(m_boundarySeparatorBeforeAppletId, appletId);")));
+    QVERIFY(interfaceCpp.contains(QStringLiteral("? m_boundarySeparatorBeforeAppletId")));
+    QVERIFY(clonedViewSource.contains(QStringLiteral("extendedInterface()->addApplet(pluginId, m_currentAppletIds.value(beforeAppletId, -1));")));
+    QVERIFY(clonedViewSource.contains(QStringLiteral("m_originalView->addApplet(pluginId, containment()->id(), originalAppletId(beforeAppletId));")));
     QVERIFY(clonedViewSource.contains(QStringLiteral("m_originalView->addApplet(data, x, y, containment()->id());\n        onCloneAppletsOrderChanged();")));
     QVERIFY(clonedViewSource.contains(QStringLiteral("extendedInterface()->addApplet(data, x, y);\n        m_syncingFromOriginal = false;\n        onOriginalAppletsOrderChanged();")));
     QVERIFY(clonedViewSource.contains(QStringLiteral("data.provides.contains(QLatin1String(Latte::PluginId::kLauncherMenu))")));
@@ -943,6 +951,14 @@ void SourceContractTest::waylandStrutGhostWindowBindsLayerShellScreen()
     QVERIFY(qwindowScreen >= 0);
     QVERIFY(layerWindow > qwindowScreen);
     QVERIFY(layerScreen > layerWindow);
+
+    QFile visibilitySource(QStringLiteral(LATTE_SOURCE_DIR "/app/view/visibilitymanager.cpp"));
+    QVERIFY(visibilitySource.open(QFile::ReadOnly));
+    const QString visibility = QString::fromUtf8(visibilitySource.readAll());
+    QVERIFY(visibility.contains(QStringLiteral("m_latteView->positioner()->screenToFollow()")));
+    QVERIFY(visibility.contains(QStringLiteral("acceptableStruts(screen->geometry())")));
+    QVERIFY(visibility.contains(QStringLiteral("setViewStruts(*m_latteView, *screen,")));
+    QVERIFY(source.contains(QStringLiteral("w->configure(location, rect, &screen)")));
 }
 
 void SourceContractTest::launchersRestoreContractMovedToQmlSmokeTest()
@@ -3613,7 +3629,7 @@ void SourceContractTest::appletItemFallbackTrackedWindowsAndConstraintHints()
     QVERIFY(src.contains(QStringLiteral("canFillScreenEdge")));
 
     // isRequestingFill must bail out for modern dock style with indexer.
-    QVERIFY(src.contains(QStringLiteral("isModernDockStyle && indexerIsSupported")));
+    QVERIFY(src.contains(QStringLiteral("singleRowLayoutEnabled && indexerIsSupported")));
 }
 
 void SourceContractTest::plasmoidLaunchersAndDragDropHavePluginDetectionGuards()
@@ -5063,9 +5079,19 @@ void SourceContractTest::lattecoronaScreenForContainmentHasDepthGuard()
     QVERIFY(f.open(QFile::ReadOnly));
     const QString src = QString::fromUtf8(f.readAll());
 
-    // screenForContainment parent-applet chain walk must be
-    // depth-limited (max 16 hops) instead of unbounded recursion.
-    QVERIFY(src.contains(QStringLiteral("depth < 16")));
+    // The parent-applet chain walk must stay depth-limited and must go through
+    // the tested policy instead of an inline loop: the depth guard now lives in
+    // NestingContainmentResolver, and excluding it from Corona would let a cyclic
+    // parent graph recurse without bound again.
+    QVERIFY(src.contains(QStringLiteral("NestingContainmentResolver::exceedsDepth(cont, parentContainment)")));
+    QVERIFY(src.contains(QStringLiteral("NestingContainmentResolver::outermost(cont, parentContainment)")));
+    QVERIFY(!src.contains(QStringLiteral("depth < 16")));
+
+    QFile resolver(QStringLiteral(LATTE_SOURCE_DIR "/app/layout/containmentscreenresolver.h"));
+    QVERIFY(resolver.open(QFile::ReadOnly));
+    const QString resolverSource = QString::fromUtf8(resolver.readAll());
+    QVERIFY(resolverSource.contains(QStringLiteral("static constexpr int MAXDEPTH = 16;")));
+    QVERIFY(resolverSource.contains(QStringLiteral("depth < MAXDEPTH")));
 }
 
 void SourceContractTest::genericLayoutScreenMappingUsesLazyAuthoritativeAdapters()
@@ -5593,7 +5619,10 @@ void SourceContractTest::positionShortcutHostLookupIsRecursiveAndResettable()
     QVERIFY(sourceFile.open(QFile::ReadOnly));
     const QString source = QString::fromUtf8(sourceFile.readAll());
     QVERIFY(source.contains(QStringLiteral("findQuickItemByObjectName(searchRoot")));
-    QVERIFY(source.contains(QStringLiteral("m_layoutManager->property(\"rootItem\")")));
+    QVERIFY(source.contains(QStringLiteral("m_layoutManagerDispatcher.rootItem()")));
+    // The containment plugin is not linked in, so the shortcut-host root must
+    // come from the typed dispatcher rather than a name-based property() read.
+    QVERIFY(!source.contains(QStringLiteral("m_layoutManager->property(")));
     QVERIFY(source.contains(QStringLiteral("clearShortcutsHost();")));
     QVERIFY(source.contains(QStringLiteral("m_shortcutsHostDestroyedConnection")));
 
@@ -6480,3 +6509,46 @@ void SourceContractTest::parabolicIconsKeepStableRasterAndSuspendInvisibleEffect
 QTEST_MAIN(SourceContractTest)
 
 #include "sourcecontracttest.moc"
+
+//! The one-shot insertion protocol replaced a pair of dynamic properties that
+//! spanned C++ and QML. A silent regression here places dropped widgets and
+//! separators at a stale index, so pin both ends: the manager keeps the token
+//! in private state, the application reaches it only through the dispatcher,
+//! and QML consumes it through the typed invokable.
+void SourceContractTest::insertionRequestIsATypedOneShotProtocol()
+{
+    QFile apiFile(QStringLiteral(LATTE_SOURCE_DIR "/containment/plugin/layoutmanagerapi.h"));
+    QVERIFY(apiFile.open(QFile::ReadOnly));
+    const QString apiSource = QString::fromUtf8(apiFile.readAll());
+    QVERIFY(apiSource.contains(QStringLiteral("virtual void expectAppletInsertionAt(const int index) = 0;")));
+    QVERIFY(apiSource.contains(QStringLiteral("virtual int takeAppletInsertionIndex() = 0;")));
+    QVERIFY(apiSource.contains(QStringLiteral("virtual void expectSkipSpacerReorderOnce() = 0;")));
+
+    QFile managerFile(QStringLiteral(LATTE_SOURCE_DIR "/containment/plugin/layoutmanager.cpp"));
+    QVERIFY(managerFile.open(QFile::ReadOnly));
+    const QString managerSource = QString::fromUtf8(managerFile.readAll());
+    QVERIFY(managerSource.contains(QStringLiteral("int LayoutManager::takeAppletInsertionIndex()")));
+    QVERIFY(managerSource.contains(QStringLiteral("const bool skipSpacerReorder = m_skipSpacerReorderOnce;")));
+    QVERIFY(!managerSource.contains(QStringLiteral("_latte_pendingInsertionIndex")));
+    QVERIFY(!managerSource.contains(QStringLiteral("_latte_skipSpacerReorder")));
+
+    // Only the dispatcher may still speak the legacy dynamic-property protocol,
+    // and only for a plugin from another installation root.
+    QFile dispatcherFile(QStringLiteral(LATTE_SOURCE_DIR "/app/view/layoutmanagerapidispatcher.h"));
+    QVERIFY(dispatcherFile.open(QFile::ReadOnly));
+    QVERIFY(QString::fromUtf8(dispatcherFile.readAll()).contains(QStringLiteral("_latte_pendingInsertionIndex")));
+
+    for (const char *relativePath : { "/app/view/containmentinterface.cpp", "/app/view/view.cpp" }) {
+        QFile callerFile(QStringLiteral(LATTE_SOURCE_DIR) + QLatin1String(relativePath));
+        QVERIFY2(callerFile.open(QFile::ReadOnly), relativePath);
+        const QString callerSource = QString::fromUtf8(callerFile.readAll());
+        QVERIFY2(!callerSource.contains(QStringLiteral("_latte_pendingInsertionIndex")), relativePath);
+        QVERIFY2(!callerSource.contains(QStringLiteral("_latte_skipSpacerReorder")), relativePath);
+    }
+
+    QFile containmentQml(QStringLiteral(LATTE_SOURCE_DIR "/containment/package/contents/ui/main.qml"));
+    QVERIFY(containmentQml.open(QFile::ReadOnly));
+    const QString containmentSource = QString::fromUtf8(containmentQml.readAll());
+    QVERIFY(containmentSource.contains(QStringLiteral("fastLayoutManager.takeAppletInsertionIndex()")));
+    QVERIFY(!containmentSource.contains(QStringLiteral("fastLayoutManager._latte_pendingInsertionIndex")));
+}

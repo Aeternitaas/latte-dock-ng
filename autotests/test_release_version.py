@@ -77,7 +77,13 @@ class ReleaseVersionTest(unittest.TestCase):
             root = Path(directory)
             packages = root / "dist"
             packages.mkdir()
-            for name in ("a.rpm", "b.rpm", "c.rpm", "d.deb", "e.deb", "f.deb", "g.pkg.tar.zst"):
+            for name in ("latte-dock-ng-1.2.56-1-x86_64.pkg.tar.zst",
+                         "latte-dock-ng-1.2.56-1-x86_64-fedora.rpm",
+                         "latte-dock-ng-1.2.56-1-x86_64-opensuse.rpm",
+                         "latte-dock-ng_1.2.56-1+deb13u1_amd64.deb",
+                         "latte-dock-ng_1.2.56-1_amd64.deb",
+                         "latte-dock-ng_1.2.56-1ubuntu1_amd64.deb",
+                         "latte-dock-ng-1.2.56-1-x86_64-mageia.rpm"):
                 (packages / name).write_bytes(name.encode())
             record = root / "candidate.json"
             args = ["--version", "1.2.56", "--sha", "a" * 40, "--run-id", "123",
@@ -92,9 +98,44 @@ class ReleaseVersionTest(unittest.TestCase):
                 result = subprocess.run([sys.executable, str(SCRIPT), "verify", *args], capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
                 record.write_text(original)
-            (packages / "a.rpm").write_bytes(b"changed")
+            (packages / "latte-dock-ng-1.2.56-1-x86_64-fedora.rpm").write_bytes(b"changed")
             result = subprocess.run([sys.executable, str(SCRIPT), "verify", *args], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
+
+    def test_metadata_requires_every_supported_distribution(self):
+        """Every supported distribution must contribute its own package."""
+        required = {
+            "arch": "latte-dock-ng-1.2.56-1-x86_64.pkg.tar.zst",
+            "fedora": "latte-dock-ng-1.2.56-1-x86_64-fedora.rpm",
+            "opensuse": "latte-dock-ng-1.2.56-1-x86_64-opensuse.rpm",
+            "mageia": "latte-dock-ng-1.2.56-1-x86_64-mageia.rpm",
+            "debian13": "latte-dock-ng_1.2.56-1+deb13u1_amd64.deb",
+            "debian-testing": "latte-dock-ng_1.2.56-1_amd64.deb",
+            "ubuntu": "latte-dock-ng_1.2.56-1ubuntu1_amd64.deb",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = root / "candidate.json"
+            packages = root / "dist"
+            packages.mkdir()
+            for name in required.values():
+                (packages / name).write_bytes(name.encode())
+            args = ["--version", "1.2.56", "--sha", "a" * 40, "--run-id", "123",
+                    "--packages", str(packages), "--file", str(record)]
+            subprocess.run([sys.executable, str(SCRIPT), "metadata", *args], check=True)
+            data = json.loads(record.read_text())
+            self.assertEqual(len(data["packages"]), 7)
+
+            # Every distribution is required, including Mageia now that
+            # Cauldron builds it again. A missing one must be named, even when
+            # another package of the same format is still present.
+            for distro, name in required.items():
+                (packages / name).unlink()
+                result = subprocess.run([sys.executable, str(SCRIPT), "metadata", *args],
+                                        capture_output=True)
+                self.assertNotEqual(result.returncode, 0, distro)
+                self.assertIn(distro, result.stderr.decode())
+                (packages / name).write_bytes(name.encode())
 
     def test_gentoo_manifest_tracks_final_archive_and_current_package_files(self):
         with tempfile.TemporaryDirectory() as directory:

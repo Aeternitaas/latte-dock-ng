@@ -18,6 +18,9 @@
 #include <QVariant>
 #include <QtQml/qqmlregistration.h>
 
+// local
+#include "layoutmanagerapi.h"
+
 // Plasma
 // Full definition needed: moc's metatype helpers require the return type of
 // containmentObject() to be complete.
@@ -26,10 +29,11 @@
 namespace Latte {
 namespace Containment {
 
-class LayoutManager : public QObject
+class LayoutManager : public QObject, public LayoutManagerApi
 {
     Q_OBJECT
     QML_NAMED_ELEMENT(LayoutManager)
+    Q_INTERFACES(Latte::Containment::LayoutManagerApi)
     Q_PROPERTY(QObject *plasmoidObj READ plasmoid() WRITE setPlasmoid NOTIFY plasmoidChanged)
 
     Q_PROPERTY(QQuickItem *rootItem READ rootItem WRITE setRootItem NOTIFY rootItemChanged)
@@ -48,7 +52,7 @@ class LayoutManager : public QObject
     Q_PROPERTY(int splitterPosition READ splitterPosition NOTIFY splitterPositionChanged)
     Q_PROPERTY(int splitterPosition2 READ splitterPosition2 NOTIFY splitterPosition2Changed)
     Q_PROPERTY(QList<int> appletOrder READ appletOrder NOTIFY appletOrderChanged)
-    Q_PROPERTY(QList<int> order READ order NOTIFY orderChanged) //includes also splitters
+    Q_PROPERTY(QList<int> order READ order NOTIFY orderChanged)
     Q_PROPERTY(QList<int> lockedZoomApplets READ lockedZoomApplets NOTIFY lockedZoomAppletsChanged)
     Q_PROPERTY(QList<int> userBlocksColorizingApplets READ userBlocksColorizingApplets NOTIFY userBlocksColorizingAppletsChanged)
     Q_PROPERTY(QList<int> appletsInScheduledDestruction READ appletsInScheduledDestruction NOTIFY appletsInScheduledDestructionChanged)
@@ -57,21 +61,22 @@ public:
     static const int JUSTIFYSPLITTERID = -10;
 
     LayoutManager(QObject *parent = nullptr);
+    ~LayoutManager() override;
 
     bool hasRestoredApplets() const;
 
     int splitterPosition() const;
     int splitterPosition2() const;
     QList<int> appletOrder() const;
-    QList<int> lockedZoomApplets() const;
-    QList<int> order() const;
-    QList<int> userBlocksColorizingApplets() const;
+    QList<int> lockedZoomApplets() const override;
+    QList<int> order() const override;
+    QList<int> userBlocksColorizingApplets() const override;
     QList<int> appletsInScheduledDestruction() const;
 
     QObject *plasmoid() const;
     void setPlasmoid(QObject *plasmoid);
 
-    QQuickItem *rootItem() const;
+    QQuickItem *rootItem() const override;
     void setRootItem(QQuickItem *root);
 
     QQuickItem *mainLayout() const;
@@ -83,7 +88,7 @@ public:
     QQuickItem *endLayout() const;
     void setEndLayout(QQuickItem *end);
 
-    QQuickItem *dndSpacer() const;
+    QQuickItem *dndSpacer() const override;
     void setDndSpacer(QQuickItem *dnd);
 
     QQuickItem *metrics() const;
@@ -93,37 +98,43 @@ public Q_SLOTS:
     Q_INVOKABLE void restore();
     Q_INVOKABLE void save();
     Q_INVOKABLE void saveOptions();
-    Q_INVOKABLE void setOption(const int &appletId, const QString &property, const QVariant &value);
+    Q_INVOKABLE void setOption(const int &appletId, const QString &property, const QVariant &value) override;
 
     Q_INVOKABLE void addAppletItem(QObject *applet, int x, int y);
-    Q_INVOKABLE void addAppletItem(QObject *applet, int index);
-    Q_INVOKABLE void removeAppletItem(QObject *applet);
-    Q_INVOKABLE void hideAppletItem(QObject *applet);
-    Q_INVOKABLE void showAppletItem(QObject *applet);
+    Q_INVOKABLE void addAppletItem(QObject *applet, int index) override;
+    Q_INVOKABLE void removeAppletItem(QObject *applet) override;
+    Q_INVOKABLE void hideAppletItem(QObject *applet) override;
+    Q_INVOKABLE void showAppletItem(QObject *applet) override;
 
     Q_INVOKABLE void addJustifySplittersInMainLayout();
     Q_INVOKABLE void moveAppletsBasedOnJustifyAlignment();
     Q_INVOKABLE void joinLayoutsToMainLayout();
     Q_INVOKABLE void insertBefore(QQuickItem *hoveredItem, QQuickItem *item);
     Q_INVOKABLE void insertAfter(QQuickItem *hoveredItem, QQuickItem *item);
-    Q_INVOKABLE void insertAtCoordinates(QQuickItem *item, const int &x, const int &y);
+    Q_INVOKABLE void insertAtCoordinates(QQuickItem *item, const int &x, const int &y) override;
     Q_INVOKABLE bool repairAppletContainers();
     Q_INVOKABLE QObject *resolveAppletQuickItem(QObject *applet) const;
     Q_INVOKABLE int appletId(QObject *applet) const;
     Q_INVOKABLE QString appletIcon(QObject *applet) const;
     Q_INVOKABLE QString appletIconPath(QObject *applet) const;
 
-    Q_INVOKABLE int dndSpacerIndex();
+    Q_INVOKABLE int dndSpacerIndex() override;
     Q_INVOKABLE int defaultInsertionIndex() const;
 
     Q_INVOKABLE bool isMasqueradedIndex(const int &x, const int &y);
     Q_INVOKABLE int masquearadedIndex(const int &x, const int &y);
     Q_INVOKABLE QPoint indexToMasquearadedPoint(const int &index);
 
-    Q_INVOKABLE void requestAppletsOrder(const QList<int> &order);
-    Q_INVOKABLE void requestAppletsInLockedZoom(const QList<int> &applets);
-    Q_INVOKABLE void requestAppletsDisabledColoring(const QList<int> &applets);
-    Q_INVOKABLE void setAppletInScheduledDestruction(const int &id, const bool &enabled);
+    Q_INVOKABLE void requestAppletsOrder(const QList<int> &order) override;
+    Q_INVOKABLE void requestAppletsInLockedZoom(const QList<int> &applets) override;
+    Q_INVOKABLE void requestAppletsDisabledColoring(const QList<int> &applets) override;
+    Q_INVOKABLE void setAppletInScheduledDestruction(const int &id, const bool &enabled) override;
+
+    //! One-shot insertion protocol; see LayoutManagerApi for the lifetime rule.
+    //! The negative expect overload clears an unconsumed request.
+    void expectAppletInsertionAt(const int index) override;
+    int takeAppletInsertionIndex() override;
+    void expectSkipSpacerReorderOnce() override;
 
 
 Q_SIGNALS:
@@ -194,9 +205,6 @@ private:
     void setLockedZoomApplets(const QList<int> &applets);
     void setUserBlocksColorizingApplets(const QList<int> &applets);
 
-    void reorderSplitterInStartLayout();
-    void reorderSplitterInEndLayout();
-
     bool isJustifySplitter(const QQuickItem *item) const;
     bool isValidApplet(const int &id);
     bool insertAtLayoutCoordinates(QQuickItem *layout, QQuickItem *item, int x, int y);
@@ -205,8 +213,6 @@ private:
     int distanceFromTail(QQuickItem *layout, QPointF pos) const;
     int distanceFromHead(QQuickItem *layout, QPointF pos) const;
 
-    QQuickItem *firstSplitter();
-    QQuickItem *lastSplitter();
     QQuickItem *appletItem(const int &id);
     QQuickItem *appletItemInLayout(QQuickItem *layout, const int &id);
 
@@ -214,6 +220,20 @@ private:
     QString toStr(const QList<int> &list);
 
 private:
+    void warnRootInvocationFailureOnce(const QMetaMethod &method, const char *functionName);
+
+    //! A layout-child role the manager reads by name (isInternalViewSplitter,
+    //! isParabolicEdgeSpacer, backendAppletRef) is declared in the containment QML.
+    //! A rename turns every read into QVariant() -> false without a single line of
+    //! output, so a broken layout silently keeps working with wrong answers.
+    //! Report the absence once per name instead: it costs nothing at run time and
+    //! needs no QML root-type change. `applet` is deliberately excluded because
+    //! Plasma supplies it on backend applet objects rather than in this package.
+    void warnLayoutChildRoleMissingOnce(const QMetaObject *metaObject, const char *propertyName);
+    void noteLayoutChildRoles(const QQuickItem *item);
+
+    QSet<QByteArray> m_warnedLayoutChildRoles;
+
     //! This is needed in order to overcome plasma frameworks limitations and instead of adding dropped widgets
     //! based on coordinates, to be able to add them directly at the correct index
     static const int MASQUERADEDINDEXTOPOINTBASE = -23456;
@@ -231,6 +251,7 @@ private:
     //! during a containment reload or teardown. QPointer makes late timers
     //! and signals see null instead of a dangling object.
     QPointer<QQuickItem> m_rootItem;
+    QMetaObject::Connection m_rootDestroyedConnection;
     QPointer<QQuickItem> m_dndSpacer;
 
     QPointer<QQuickItem> m_mainLayout;
@@ -245,8 +266,9 @@ private:
     QHash<int, QQuickItem *> m_appletsInScheduledDestruction;
 
     QMetaMethod m_createAppletItemMethod;
-    QMetaMethod m_createJustifySplitterMethod;
     QMetaMethod m_initAppletContainerMethod;
+    QSet<QByteArray> m_warnedRootInvocationFailures;
+    quint64 m_rootGeneration{0};
 
     bool m_hasRestoredApplets{false};
     int m_restoreRetryCount{0};
@@ -255,6 +277,18 @@ private:
     //! first QString is the option in AppletItem
     //! second QString is how the option is stored in
     QHash<QString, QString> m_option;
+
+    //! Pending one-shot insertion request. A non-negative value is the index an
+    //! applet created by the next addAppletItem() call must use instead of the
+    //! index or (x,y) the caller passes; -1 means no request. It is consumed by
+    //! the first addAppletItem() dispatch and cleared when the requester drops
+    //! it, so a creation that never reports an applet cannot displace a later
+    //! applet to a stale position.
+    int m_pendingInsertionIndex{-1};
+
+    //! Set while a programmatic separator creation runs. save() must skip
+    //! reorderParabolicSpacers() once while it is set and then clear it.
+    bool m_skipSpacerReorderOnce{false};
 };
 }
 }

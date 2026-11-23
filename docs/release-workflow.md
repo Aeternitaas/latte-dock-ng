@@ -221,6 +221,52 @@ removes the pool files of a package version when it publishes the next one.
 under `/bin/sh` and `dash`. If Neon stays unreachable for longer than the
 attempts last, rerun the failed jobs later instead of changing the project.
 
+On 2026-11-19, `Build` run
+[`44575446051`](https://github.com/ruizhi-lab/latte-dock-ng/actions/runs/44575446051)
+(the `ver=1.3.4` release candidate) failed both Mageia jobs while building the
+packaging image, with every other job green. dnf reported
+`nothing provides libLLVM.so.22.1 / libclang.so.22.1 / libclang-cpp.so.22.1
+needed by qttools6-6.11.1-1.mga11.x86_64`. Cauldron has moved LLVM and clang to
+23.1 (`lib64llvm23.1-23.1.6-1.mga11`, `clang-23.1.6-1.mga11`) and ships no
+package that provides the 22.1 sonames, while `qttools6` is still built against
+them, so Cauldron cannot install its own Qt tooling. This is a Cauldron
+packaging inconsistency rather than a mirror sync failure: the retry helper
+matches only 404 and unusable-metadata messages, so it exits immediately on a
+`nothing provides` failure and the log shows no retry attempt. Nothing in the
+project can resolve it, and the image never reaches the source. Because
+`release-candidate-metadata` needs `install-verify` and `package-install-verify`
+without `if: always()`, this blocked the candidate record and therefore the
+automatic release.
+
+Cauldron fixed this during the release: the next push build (run `44671635390`)
+reported both Mageia jobs as `success`, because `qttools6` was rebuilt against
+the LLVM 23.1 sonames. The temporary tolerance has therefore been removed:
+
+- Both Mageia matrix legs no longer carry `continue-on-error`, so a Mageia
+  failure blocks the candidate record again like every other distribution.
+- `TOLERATED_ABSENT_DISTROS` in `scripts/release-version.py` is empty. The check
+  still matches each distribution's packaged file name against
+  `DISTRO_PACKAGE_PATTERNS` instead of counting packages, so one distribution
+  can never stand in for another, and a missing one is named in the error.
+- `test_metadata_requires_every_supported_distribution` requires all seven
+  distributions and asserts that dropping each one individually fails.
+- `auto-release.yml` requires exactly seven packages again.
+
+`TOLERATED_ABSENT_DISTROS` remains the single place to record a documented
+upstream fault. If a distribution genuinely cannot build, add it there, note
+the fault and its removal condition in this section, and state in the release
+notes that the distribution was not validated. Remove it as soon as the fault
+clears; the entry must not outlive the cause.
+
+While the gate was relaxed, `Release` also failed on its own hardcoded count,
+`test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 7`, after the tag already
+existed. That step now runs the same `release-version.py verify` as
+`main-validation`, so one distribution-aware check decides the question in both
+places. It also checks out the source and downloads
+`release-candidate-metadata`, because the verifier is a repository script and
+needs the recorded candidate. Keep package set validation in that one script: a
+hardcoded count would break the release the same way again.
+
 On 2026-11-03, Plasma 6.8.2 reached the supported targets and bumped
 `libPlasma`/`libPlasmaQuick` from soname 7 to 8. Packages published before that
 bump stay linked to soname 7, so Fedora 44, openSUSE Tumbleweed and Arch users

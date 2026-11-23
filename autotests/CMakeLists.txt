@@ -206,6 +206,7 @@ target_compile_definitions(qmlsmoketest PRIVATE
     LATTE_LAUNCHER_ANIMATION_QML="${CMAKE_SOURCE_DIR}/plasmoid/package/contents/ui/task/animations/LauncherAnimation.qml"
     LATTE_SHOW_WINDOW_ANIMATION_QML="${CMAKE_SOURCE_DIR}/plasmoid/package/contents/ui/task/animations/ShowWindowAnimation.qml"
     LATTE_PARABOLIC_ITEM_QML="${CMAKE_SOURCE_DIR}/declarativeimports/abilities/items/basicitem/ParabolicItem.qml"
+    LATTE_HIDDEN_SPACER_QML="${CMAKE_SOURCE_DIR}/declarativeimports/abilities/items/basicitem/HiddenSpacer.qml"
     LATTE_PARABOLICAREA_QML="${CMAKE_SOURCE_DIR}/containment/package/contents/ui/applet/ParabolicArea.qml"
     LATTE_COMPACT_APPLET_QML="${CMAKE_SOURCE_DIR}/shell/package/contents/applet/CompactApplet.qml"
     LATTE_INFO_VIEW_QML="${CMAKE_SOURCE_DIR}/shell/package/contents/views/InfoView.qml"
@@ -804,6 +805,7 @@ target_compile_definitions(pluginregistrationunittest PRIVATE
 target_link_libraries(pluginregistrationunittest
     Qt6::Core
     Qt6::Qml
+    Qt6::Quick
     Qt6::Test
 )
 
@@ -1156,6 +1158,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME qmllintbaselinetest
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_qmllint_baseline.py)
     set_property(TEST qmllintbaselinetest PROPERTY TIMEOUT 30)
+    add_test(NAME qmllintfileinventorytest
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_qmllint_file_inventory.py)
+    set_property(TEST qmllintfileinventorytest PROPERTY TIMEOUT 30)
     add_test(NAME handbookdocumenttest
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_handbook.py)
     set_property(TEST handbookdocumenttest PROPERTY TIMEOUT 30)
@@ -1178,6 +1183,20 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME logoutsimulationtest
         COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/test_logout_simulation.py)
     set_property(TEST logoutsimulationtest PROPERTY TIMEOUT 60)
+    # R5's KSycoca validity rule of the performance collector; needs no dock, process or desktop.
+    add_test(NAME measurefamilyrulestest
+        COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/test_measure_process_family.py)
+    set_property(TEST measurefamilyrulestest PROPERTY TIMEOUT 60)
+    # The clang-tidy gate's renamed-check selection (LLVM 23 successor vs LLVM 18/22 predecessor);
+    # needs no clang-tidy binary or compile database.
+    add_test(NAME clangtidyrenamestest
+        COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/test_clang_tidy_renames.py)
+    set_property(TEST clangtidyrenamestest PROPERTY TIMEOUT 60)
+    # The two KDE Neon bootstrap steps of build.yml: identical copies, both mirrors retried, and
+    # the apt retry policy written before the first index update. Needs no network or Docker.
+    add_test(NAME neonrepositorytest
+        COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/test_neon_repository_contract.py)
+    set_property(TEST neonrepositorytest PROPERTY TIMEOUT 60)
 else()
     message(STATUS "Python3 interpreter unavailable; qmllint baseline parser test is not registered")
 endif()
